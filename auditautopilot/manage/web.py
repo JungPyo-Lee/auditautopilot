@@ -166,6 +166,7 @@ class Handler(BaseHTTPRequestHandler):
                 if fname:
                     if data:
                         files.append((Path(fname.replace("\\", "/")).name, data))
+                        lists.setdefault(f"@{name}", []).append(len(files) - 1)   # 파일 칸 이름 -> 순번
                 elif name:
                     value = data.decode(part.get_content_charset() or "utf-8")
                     fields[name] = value
@@ -199,6 +200,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/confirm/project", "confirm_project"),
         ("POST", r"/e/(\d+)/confirm/materiality", "confirm_materiality"),
         ("GET", r"/e/(\d+)/confirm\.xlsx", "confirm_xlsx"),
+        ("POST", r"/e/(\d+)/leadsheet", "leadsheet_make"),
+        ("GET", r"/e/(\d+)/leadsheet\.xlsx", "leadsheet_xlsx"),
         ("POST", r"/e/(\d+)/questions", "question_add"),
         ("POST", r"/e/(\d+)/questions/act", "question_act"),
         ("POST", r"/e/(\d+)/questions/(\d+)", "question_edit"),
@@ -464,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
 {links_html}
 <table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
 {''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>
+{self._leadsheet_card(e)}
 {self._confirm_card(e, cfg)}
 {self._question_card(e, cfg)}
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
@@ -574,6 +578,67 @@ class Handler(BaseHTTPRequestHandler):
 <input type="file" name="files" multiple accept=".xlsx"><button class="ghost">장부와 함께 대사표 만들기</button></form>
 <p class="mute">더존 재무상태표·거래처원장을 고르면 위에서 가져온 회신현황과 합쳐 발송금액을 장부 잔액과 맞춰 보고 계정별 조회 비율을 낸 대사표를 내려받습니다.
 사이트에서 직접 받은 회신현황 엑셀을 함께 골라도 됩니다.</p></div>"""
+
+    # ── 리드시트 ──────────────────────────────────────
+    def _leadsheet_card(self, e) -> str:
+        eid = e["id"]
+        rec = self.store.get_setting(f"leadsheet:{eid}")
+        last = ""
+        if rec:
+            lines = "".join(f"<li>{esc(x)}</li>" for x in rec.get("lines", []))
+            last = (f"<p>{esc(rec.get('made_at', ''))} 만든 조서: <a class='btn ghost' href='/e/{eid}/leadsheet.xlsx'>"
+                    f"{esc(Path(rec.get('path', '')).name)} 내려받기</a></p><ul class='mute'>{lines}</ul>")
+        return f"""<div class="card" id="leadsheet"><h2 style="margin-top:0">리드시트·거래처 명세 (조서 채우기)</h2>
+<form method="post" action="/e/{eid}/leadsheet" enctype="multipart/form-data">
+<div class="row"><label>조서 양식<input type="file" name="workpaper" accept=".xlsx" required></label>
+<label>회사 자료 (여러 개)<input type="file" name="files" multiple accept=".xlsx"></label>
+<button>조서 채우기</button></div></form>
+<p class="mute">더존 합계잔액시산표는 꼭 넣고, 재무상태표·손익계산서(과목별, 전기 금액용)와 거래처원장(잔액)을 함께 고르면
+TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거래처원장은 해당 ○1100 탭에 거래처별 명세로 들어갑니다.
+거래처원장이 어느 계정인지는 잔액으로 찾고, 못 찾으면 파일 이름을 계정명으로 바꿔 올려 주세요 (예: 미지급금.xlsx).
+회사가 준 시산표를 조서에 옮겨 적는 것이며 재무제표를 대신 작성하지 않습니다.</p>{last}</div>"""
+
+    def leadsheet_make(self, eid):
+        import tempfile
+        from datetime import datetime
+
+        from ..workpaper import leadsheet
+
+        e, cfg = self._eng(eid), self.app.cfg()
+        f, files = self._form()
+        idx = (f.get("@workpaper") or [None])[0]
+        if idx is None:
+            raise ValueError("조서 양식 파일을 고르세요.")
+        wp = files[idx]
+        sources = [x for i, x in enumerate(files) if i != idx]
+        if not sources:
+            raise ValueError("합계잔액시산표 등 회사 자료를 함께 고르세요.")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, (name, data) in enumerate([wp] + sources):
+                if not name.lower().endswith(".xlsx"):
+                    raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+                d = Path(tmp) / f"{i:02d}"
+                d.mkdir()
+                p = d / Path(name).name
+                p.write_bytes(data)
+                paths.append(p)
+            out = Path(tmp) / "out" / f"{Path(wp[0]).stem}_리드시트.xlsx"
+            res = leadsheet.build(paths[0], paths[1:], out)
+            saved = filing.save_file(self.store, e, cfg, out.name, data=out.read_bytes(), received_on=self.app.today(),
+                                     source="리드시트", category="조서")
+        self.store.set_setting(f"leadsheet:{e['id']}", {
+            "made_at": datetime.now().replace(microsecond=0).isoformat(" "), "path": str(saved["path"]),
+            "lines": res.lines()})
+        self._redirect(f"/e/{eid}#leadsheet", res.lines()[0])
+
+    def leadsheet_xlsx(self, eid):
+        e = self._eng(eid)
+        rec = self.store.get_setting(f"leadsheet:{e['id']}") or {}
+        p = Path(rec.get("path") or "")
+        if not rec or not p.exists():
+            raise ValueError("먼저 [조서 채우기]를 해 주세요.")
+        self._download(p.read_bytes(), p.name, mailer.XLSX[0] + "/" + mailer.XLSX[1])
 
     # ── 질문서 ────────────────────────────────────────
     def _question_card(self, e, cfg) -> str:
