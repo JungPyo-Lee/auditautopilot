@@ -231,6 +231,20 @@ def cmd_leadsheet(args) -> int:
     return 0
 
 
+def cmd_adjust(args) -> int:
+    from .workpaper import adjust
+
+    if args.template:
+        print(f"저장: {adjust.aje_template(args.workpaper, args.output)}")
+        return 0
+    if not args.aje:
+        raise ValueError("수정분개 파일을 주세요 (양식만 만들 때는 --template).")
+    res = adjust.apply(args.workpaper, args.aje, args.output)
+    print("\n".join(res.summary()))
+    print(f"저장: {args.output}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .manage.web import serve
 
@@ -305,6 +319,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="거래처원장이 어느 계정인지 직접 정할 때. 예: --ledger 거래처원장(1).xlsx=외상매출금")
     ls.add_argument("-o", "--output", required=True)
     ls.set_defaults(func=cmd_leadsheet)
+
+    ad = sub.add_parser("adjust", help="수정분개를 조서에 반영 (AJE·정산표·수정후BS·IS·현금흐름정산표 탭, 리드시트 Audited 칸)")
+    ad.add_argument("workpaper", help="리드시트까지 채운 조서 (leadsheet 결과)")
+    ad.add_argument("aje", nargs="?", help="채운 수정분개 양식")
+    ad.add_argument("--template", action="store_true", help="이 조서의 계정과목으로 빈 수정분개 양식만 만든다")
+    ad.add_argument("-o", "--output", required=True)
+    ad.set_defaults(func=cmd_adjust)
 
     sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
     sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")

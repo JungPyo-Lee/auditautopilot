@@ -167,6 +167,10 @@ class XlsxPackage:
     # ---- 시트 추가 ----
     def add_sheet_first(self, name: str, sheet_xml: bytes) -> None:
         """맨 앞에 새 시트를 넣는다. 시트 순서가 바뀌므로 localSheetId와 활성 탭도 맞춘다."""
+        self.add_sheet(name, sheet_xml, first=True)
+
+    def add_sheet(self, name: str, sheet_xml: bytes, first: bool = False) -> None:
+        """새 시트를 맨 뒤(first=True면 맨 앞)에 넣는다."""
         if name in {s.name for s in self.sheets()}:
             raise ValueError(f"이미 '{name}' 시트가 있습니다.")
         used_paths = set(self._data) | set(self._new_files)
@@ -193,12 +197,73 @@ class XlsxPackage:
             prefix, declare = "r", f' xmlns:r="{NS_REL}"'
         max_id = max((int(_attrs(m.group(0))["sheetId"]) for m in self._sheet_tags()), default=0)
         tag = f'<sheet{declare} name={quoteattr(name)} sheetId="{max_id + 1}" {prefix}:id="{rid}"/>'
+        self._new_files[part] = sheet_xml
+        if not first:
+            i = self._wb.index("</sheets>")
+            self._wb = self._wb[:i] + tag + self._wb[i:]
+            return
         self._wb = re.sub(r"<sheets>", "<sheets>" + tag.replace("\\", "\\\\"), self._wb, count=1)
 
         self._wb = re.sub(r'localSheetId="(\d+)"',
                           lambda m: f'localSheetId="{int(m.group(1)) + 1}"', self._wb)
-        self._new_files[part] = sheet_xml
         self.set_active_sheet(0)
+
+    def remove_sheet(self, name: str) -> None:
+        """이 도구가 전에 넣은 시트를 다시 만들 때 지운다 (다른 시트의 수식이 가리키지 않는 시트만)."""
+        info = next((x for x in self.sheets() if x.name == name), None)
+        if info is None:
+            return
+        self._wb = _SHEET_TAG_RE.sub(lambda m: "" if _attrs(m.group(0)).get("name") == name else m.group(0),
+                                     self._wb)
+        self._rels = re.sub(rf'<Relationship\b[^>]*Id="{re.escape(info.rel_id)}"[^>]*/>', "", self._rels)
+        part = info.path
+        self._ct = re.sub(rf'<Override\b[^>]*PartName="/{re.escape(part)}"[^>]*/>', "", self._ct)
+        self._data.pop(part, None)
+        self._new_files.pop(part, None)
+        self._infos = [i for i in self._infos if i.filename != part]
+        self._sheet_edits.pop(name, None)
+        rel_part = part.replace("worksheets/", "worksheets/_rels/") + ".rels"
+        self._data.pop(rel_part, None)
+        self._infos = [i for i in self._infos if i.filename != rel_part]
+
+    # ---- 서식 ----
+    def add_basic_styles(self) -> dict[str, str]:
+        """새 시트에 쓸 서식(숫자 #,##0, 굵게, 제목, 머리글 바탕색)을 styles.xml 끝에 더한다. 반환: 이름 -> s 번호"""
+        xml = self._data["xl/styles.xml"].decode("utf-8")
+
+        def append(tag: str, items: list[str]) -> int:
+            nonlocal xml
+            m = re.search(rf"<{tag}\b([^>]*)>(.*?)</{tag}>", xml, re.S)
+            first = len(re.findall(rf"<{tag[:-1]}\b", m.group(2)))
+            body = m.group(2) + "".join(items)
+            head = re.sub(r'\s+count="\d+"', "", m.group(1)) + f' count="{first + len(items)}"'
+            xml = xml[:m.start()] + f"<{tag}{head}>{body}</{tag}>" + xml[m.end():]
+            return first
+
+        f0 = append("fonts", ['<font><b/><sz val="10"/><name val="맑은 고딕"/></font>',
+                              '<font><b/><sz val="13"/><name val="맑은 고딕"/></font>',
+                              '<font><sz val="10"/><name val="맑은 고딕"/></font>',
+                              '<font><b/><sz val="10"/><color rgb="FFC00000"/><name val="맑은 고딕"/></font>'])
+        fill = append("fills", ['<fill><patternFill patternType="solid"><fgColor rgb="FFDDE6F4"/>'
+                                '<bgColor indexed="64"/></patternFill></fill>',
+                                '<fill><patternFill patternType="solid"><fgColor rgb="FFFFF8DC"/>'
+                                '<bgColor indexed="64"/></patternFill></fill>'])
+        bold, title, plain, red = f0, f0 + 1, f0 + 2, f0 + 3
+        specs = {
+            "text": f'<xf numFmtId="0" fontId="{plain}" fillId="0" borderId="0" xfId="0" applyFont="1"/>',
+            "num": f'<xf numFmtId="3" fontId="{plain}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
+            "bold": f'<xf numFmtId="0" fontId="{bold}" fillId="0" borderId="0" xfId="0" applyFont="1"/>',
+            "boldnum": f'<xf numFmtId="3" fontId="{bold}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
+            "title": f'<xf numFmtId="0" fontId="{title}" fillId="0" borderId="0" xfId="0" applyFont="1"/>',
+            "head": (f'<xf numFmtId="0" fontId="{bold}" fillId="{fill}" borderId="0" xfId="0" applyFont="1" '
+                     f'applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'),
+            "input": f'<xf numFmtId="3" fontId="{plain}" fillId="{fill + 1}" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>',
+            "check": f'<xf numFmtId="3" fontId="{red}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
+            "pct": f'<xf numFmtId="10" fontId="{plain}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
+        }
+        x0 = append("cellXfs", list(specs.values()))
+        self._data["xl/styles.xml"] = xml.encode("utf-8")
+        return {k: str(x0 + i) for i, k in enumerate(specs)}
 
     def set_active_sheet(self, index: int) -> None:
         def fix_view(m: re.Match) -> str:
@@ -351,6 +416,45 @@ def build_sheet_xml(rows: list[list[str | None]], links: dict[tuple[int, int], s
             ref = f"{column_letter(c)}{r + 1}"
             out.append(f"<hyperlink ref={quoteattr(ref)} location={quoteattr(location)}/>")
         out.append("</hyperlinks>")
+    out.append('<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>')
+    out.append("</worksheet>")
+    return "".join(out).encode("utf-8")
+
+
+def grid_xml(cells: dict[str, tuple], widths: list[float], freeze: str | None = None,
+             merges: list[str] | None = None) -> bytes:
+    """셀 하나하나를 정해 시트 XML을 만든다. cells: 'B3' -> (값, s번호). 값은 글자·숫자·Formula."""
+    rows: dict[int, list[tuple[int, str]]] = {}
+    for ref, (value, style) in cells.items():
+        col, row = split_ref(ref)
+        attrs = f' r="{ref}"' + (f' s="{style}"' if style else "")
+        if value is None or value == "":
+            x = f"<c{attrs}/>"
+        elif isinstance(value, Formula):
+            x = f"<c{attrs}><f>{escape(value[1:] if value.startswith('=') else value)}</f></c>"
+        elif isinstance(value, (int, float)):
+            x = f"<c{attrs}><v>{_num(value)}</v></c>"
+        else:
+            x = f'<c{attrs} t="inlineStr"><is><t xml:space="preserve">{escape(str(value))}</t></is></c>'
+        rows.setdefault(row, []).append((column_index(col), x))
+    out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+           f'<worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_REL}">', '<sheetViews><sheetView workbookViewId="0">']
+    if freeze:
+        col, row = split_ref(freeze)
+        xs, ys = column_index(col) - 1, row - 1
+        attrs = (f' xSplit="{xs}"' if xs else "") + (f' ySplit="{ys}"' if ys else "")
+        pane = "bottomRight" if xs and ys else ("bottomLeft" if ys else "topRight")
+        out.append(f'<pane{attrs} topLeftCell="{freeze}" activePane="{pane}" state="frozen"/>')
+    out.append('</sheetView></sheetViews><sheetFormatPr defaultRowHeight="16.5"/><cols>')
+    for i, w in enumerate(widths, start=1):
+        out.append(f'<col min="{i}" max="{i}" width="{w}" customWidth="1"/>')
+    out.append("</cols><sheetData>")
+    for r in sorted(rows):
+        out.append(f'<row r="{r}">' + "".join(x for _, x in sorted(rows[r])) + "</row>")
+    out.append("</sheetData>")
+    if merges:
+        out.append(f'<mergeCells count="{len(merges)}">' + "".join(f'<mergeCell ref="{m}"/>' for m in merges)
+                   + "</mergeCells>")
     out.append('<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>')
     out.append("</worksheet>")
     return "".join(out).encode("utf-8")
