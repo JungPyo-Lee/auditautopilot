@@ -693,7 +693,9 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
     def _closing_part(self, e, adj_rec) -> str:
         eid = e["id"]
         if not adj_rec:
-            return ""
+            return """<h3 id="closing">주석 자료 요청 · 감사보고서 초안</h3>
+<p class="mute">위에서 [수정분개 반영]을 한 번 하면 여기에 주석 자료요청 양식과 감사보고서 초안 버튼이 생깁니다.
+수정분개가 없으면 모든 칸이 비어 있는 수정분개 양식을 그대로 올려도 됩니다.</p>"""
         opts = "".join(f"<option>{o}</option>" for o in ("적정", "한정", "부적정", "의견거절"))
         return f"""<h3 id="closing">주석 자료 요청 · 감사보고서 초안</h3>
 <p class="row"><a class="btn ghost" href="/e/{eid}/notes-request.xlsx">주석 자료요청 양식 내려받기</a></p>
