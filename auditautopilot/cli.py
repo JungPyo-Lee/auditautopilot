@@ -265,6 +265,15 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_fs(args) -> int:
+    from .workpaper import fs_doc
+
+    res = fs_doc.draft(args.workpaper, args.output, args.notes)
+    print("\n".join(f"참고: {n}" for n in res.notes))
+    print(f"저장: {res.output}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .manage.web import serve
 
@@ -358,6 +367,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--opinion", default="적정", choices=["적정", "한정", "부적정", "의견거절"])
     rp.add_argument("-o", "--output", required=True)
     rp.set_defaults(func=cmd_report)
+
+    fp = sub.add_parser("fs", help="재무제표·주석 초안 (워드)")
+    fp.add_argument("workpaper", help="수정분개까지 반영한 조서 (adjust 결과)")
+    fp.add_argument("--notes", help="회사가 채운 주석 자료 엑셀 (notes 양식)")
+    fp.add_argument("-o", "--output", required=True)
+    fp.set_defaults(func=cmd_fs)
 
     sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
     sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")
