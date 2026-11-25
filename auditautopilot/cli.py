@@ -8,6 +8,11 @@
   python -m auditautopilot materiality --benchmark 매출액 --amount 18669084279 --overall-pct 1
   python -m auditautopilot analytics 재무제표등.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
   python -m auditautopilot sample 재무제표등.xlsx --account 108 --method mus --n 25 -o 표본.xlsx
+
+더존 자료는 파일 여러 개를 함께 주면 종류를 알아서 맞춘다.
+  python -m auditautopilot import douzone 재무상태표.xlsx 손익계산서.xlsx 거래처원장*.xlsx -o 정리.xlsx
+  python -m auditautopilot analytics 재무상태표.xlsx 손익계산서.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
+  python -m auditautopilot sample 재무상태표.xlsx "거래처원장 (1).xlsx" --account 외상매출금 -o 표본.xlsx
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import re
 import sys
 
 from . import analytics, materiality, sampling
+from .importers import books as books_mod
 from .importers import douzone, semusarang
 from .reports import write_excel
 from .workpaper import make_print_copy, prepare_workpaper
@@ -42,14 +48,14 @@ def _rename(rows: list[dict], mapping: dict[str, str], keep: list[str] | None = 
 
 
 PARTNER_HEADERS = {
-    "account_code": "계정코드", "partner_code": "거래처코드", "partner": "거래처",
+    "account_code": "계정코드", "account_name": "계정과목", "partner_code": "거래처코드", "partner": "거래처",
     "reg_no": "등록번호", "opening": "전기이월", "debit": "차변", "credit": "대변", "balance": "잔액",
 }
 
 
 def _months_from_period(label: str) -> int | None:
-    """'제 14(당)기 2026년1월1일 ~ 2026년9월30일' -> 9"""
-    m = re.findall(r"(\d{4})년\s*(\d{1,2})월", label or "")
+    """'제 14(당)기 2026년1월1일 ~ 2026년9월30일' -> 9, '[2026/01/01 ~ 2026/10/31]' -> 10"""
+    m = re.findall(r"(\d{4})\s*[/.\-년]\s*(\d{1,2})\s*[/.\-월]", label or "")
     if len(m) >= 2:
         (y1, m1), (y2, m2) = m[0], m[1]
         return (int(y2) - int(y1)) * 12 + int(m2) - int(m1) + 1
@@ -69,24 +75,38 @@ def cmd_workpaper(args) -> int:
     return 0
 
 
+def _print_notes(b) -> None:
+    for n in b.notes:
+        print(f"  - {n}")
+
+
 def cmd_import(args) -> int:
-    if args.kind == "semusarang":
-        b = semusarang.load(args.src)
-        sheets = {
-            "시산표": _rename(b.tb, TB_HEADERS),
-            "재무상태표": _rename(b.bs, FS_HEADERS),
-            "손익계산서": _rename(b.pl, FS_HEADERS),
-            "분개장": _rename(b.journal, JOURNAL_HEADERS),
-            "거래처별잔액": _rename(b.partners, PARTNER_HEADERS),
-        }
-        print(f"시산표 {len(b.tb)}행, 분개장 {len(b.journal):,}행, 거래처 잔액 {len(b.partners):,}행")
-        if b.periods:
-            print(f"기간: {b.periods.get('current', '')}")
-    else:
-        j = douzone.load_journal(args.src)
+    if args.kind == "douzone-journal":
+        j = douzone.load_journal(args.src[0])
         sheets = {"분개장": _rename(j, JOURNAL_HEADERS)}
         diff = sum(r["debit"] for r in j) - sum(r["credit"] for r in j)
         print(f"분개장 {len(j):,}행, 차대 차이 {diff:,.0f}")
+    else:
+        if args.kind == "semusarang" and len(args.src) != 1:
+            print("세무사랑 묶음 파일은 하나만 주세요.", file=sys.stderr)
+            return 2
+        b = books_mod.load(args.src)
+        sheets = {}
+        if b.tb:
+            sheets["시산표"] = _rename(b.tb, TB_HEADERS)
+        if b.bs:
+            sheets["재무상태표"] = _rename(b.bs, FS_HEADERS, list(FS_HEADERS))
+        if b.pl:
+            sheets["손익계산서"] = _rename(b.pl, FS_HEADERS, list(FS_HEADERS))
+        if b.journal:
+            sheets["분개장"] = _rename(b.journal, JOURNAL_HEADERS)
+        if b.partners:
+            sheets["거래처별잔액"] = _rename(b.partners, PARTNER_HEADERS, list(PARTNER_HEADERS))
+        print(f"{b.source}: 재무상태표 {len(b.bs)}행, 손익계산서 {len(b.pl)}행, 분개장 {len(b.journal):,}행, "
+              f"거래처 잔액 {len(b.partners):,}행")
+        if b.periods:
+            print(f"기간: {b.periods.get('current', '')}")
+        _print_notes(b)
     write_excel(args.output, sheets)
     print(f"저장: {args.output}")
     return 0
@@ -96,9 +116,9 @@ def cmd_materiality(args) -> int:
     amount = args.amount
     if amount is None:
         if not args.src:
-            print("--amount 또는 세무사랑 파일 경로가 필요합니다.", file=sys.stderr)
+            print("--amount 또는 재무제표 파일 경로가 필요합니다.", file=sys.stderr)
             return 2
-        b = semusarang.load(args.src)
+        b = books_mod.load(args.src)
         fs = b.pl if args.benchmark in ("세전이익", "매출액") else b.bs
         amount = materiality.find_benchmark_amount(fs, args.benchmark)
         if amount is None:
@@ -125,7 +145,10 @@ def cmd_materiality(args) -> int:
 
 
 def cmd_analytics(args) -> int:
-    b = semusarang.load(args.src)
+    b = books_mod.load(args.src)
+    if not b.bs and not b.pl:
+        print("재무상태표나 손익계산서 파일이 필요합니다.", file=sys.stderr)
+        return 2
     months = args.months or _months_from_period(b.periods.get("current", "")) or 12
     rule = analytics.VarianceRule(args.threshold_amount, args.threshold_pct, annualize_factor=12 / months)
     bs = analytics.compare_periods(b.bs, rule)
@@ -144,6 +167,7 @@ def cmd_analytics(args) -> int:
         sheets["월별 추이"] = _rename(analytics.monthly_trend(b.journal),
                                    {"account_code": "계정코드", "account_name": "계정과목"})
     write_excel(args.output, sheets)
+    _print_notes(b)
     print(f"기준: {args.threshold_amount:,.0f}원 이상 그리고 {args.threshold_pct}% 이상, 손익 연환산 {months}개월→12개월")
     print(f"검토대상 재무상태표 {sum(r['flag'] for r in bs)}개, 손익계산서 {sum(r['flag'] for r in pl)}개, 질문 {len(questions)}건")
     print(f"저장: {args.output}")
@@ -151,15 +175,15 @@ def cmd_analytics(args) -> int:
 
 
 def cmd_sample(args) -> int:
-    b = semusarang.load(args.src)
-    code = str(int(args.account)).zfill(3) if args.account.isdigit() else args.account
+    b = books_mod.load(args.src)
     if args.source == "partners":
-        pop = _rename([r for r in b.partners if r["account_code"] == code], PARTNER_HEADERS)
+        pop = _rename(books_mod.partners_of(b, args.account), PARTNER_HEADERS, list(PARTNER_HEADERS))
         amount_col = "잔액"
     else:
-        pop = [{**r, "금액": r["debit"] - r["credit"]} for r in b.journal if r["account_code"] == code]
+        pop = [{**r, "금액": r["debit"] - r["credit"]} for r in books_mod.journal_of(b, args.account)]
         pop = _rename(pop, JOURNAL_HEADERS)
         amount_col = "금액"
+    _print_notes(b)
     if not pop:
         print(f"계정 {args.account}의 모집단이 비어 있습니다.", file=sys.stderr)
         return 2
@@ -187,13 +211,13 @@ def build_parser() -> argparse.ArgumentParser:
     wp.set_defaults(func=cmd_workpaper)
 
     im = sub.add_parser("import", help="회계 프로그램 내보내기 파일을 표준 형식으로 정리")
-    im.add_argument("kind", choices=["semusarang", "douzone-journal"])
-    im.add_argument("src")
+    im.add_argument("kind", choices=["semusarang", "douzone", "douzone-journal"])
+    im.add_argument("src", nargs="+", help="더존은 재무상태표·손익계산서·거래처원장·분개장 파일을 함께 줄 수 있다")
     im.add_argument("-o", "--output", required=True)
     im.set_defaults(func=cmd_import)
 
     ma = sub.add_parser("materiality", help="중요성 계산")
-    ma.add_argument("src", nargs="?", help="세무사랑 재무제표 파일 (금액 자동 찾기)")
+    ma.add_argument("src", nargs="*", help="세무사랑 묶음 또는 더존 재무상태표·손익계산서 (금액 자동 찾기)")
     ma.add_argument("--benchmark", required=True, choices=list(materiality.DEFAULT_PERCENTAGES))
     ma.add_argument("--amount", type=float)
     ma.add_argument("--overall-pct", type=float)
@@ -204,17 +228,17 @@ def build_parser() -> argparse.ArgumentParser:
     ma.add_argument("-o", "--output")
     ma.set_defaults(func=cmd_materiality)
 
-    an = sub.add_parser("analytics", help="분석적 검토 (세무사랑 파일)")
-    an.add_argument("src")
+    an = sub.add_parser("analytics", help="분석적 검토 (세무사랑 묶음 또는 더존 재무제표)")
+    an.add_argument("src", nargs="+")
     an.add_argument("-o", "--output", required=True)
     an.add_argument("--threshold-amount", type=float, required=True, help="보통 수행중요성")
     an.add_argument("--threshold-pct", type=float, default=10.0)
     an.add_argument("--months", type=int, help="당기 기간(개월). 생략하면 파일 머리글에서 읽는다")
     an.set_defaults(func=cmd_analytics)
 
-    sa = sub.add_parser("sample", help="표본추출 (세무사랑 파일)")
-    sa.add_argument("src")
-    sa.add_argument("--account", required=True, help="계정코드 (예: 108)")
+    sa = sub.add_parser("sample", help="표본추출 (세무사랑 묶음 또는 더존 거래처원장·분개장)")
+    sa.add_argument("src", nargs="+")
+    sa.add_argument("--account", required=True, help="계정코드(108) 또는 계정명(외상매출금)")
     sa.add_argument("--source", choices=["partners", "journal"], default="partners",
                     help="partners=거래처별 잔액, journal=분개장 전표")
     sa.add_argument("--method", choices=list(sampling.METHODS), default="mus")
