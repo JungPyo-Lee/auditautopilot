@@ -206,3 +206,25 @@ def test_open_workbook_repairs_bad_style_index(filled, tmp_path):
     assert "TB" in open_workbook(bad).sheetnames
     res = adjust.apply(bad, _aje(tmp_path, filled, AJE_ROWS), tmp_path / "반영.xlsx")
     assert res.entries == 1
+
+
+def test_outputs_open_in_normal_view(filled, tmp_path):
+    """페이지 나누기 미리 보기로 저장된 양식도 결과는 기본 보기 (인쇄영역은 남김)."""
+    import zipfile
+    src = tmp_path / "pbp.xlsx"
+    with zipfile.ZipFile(filled) as a, zipfile.ZipFile(src, "w") as b:
+        for i in a.infolist():
+            d = a.read(i.filename)
+            if i.filename.startswith("xl/worksheets/sheet"):
+                d = d.replace(b"<sheetView ", b'<sheetView view="pageBreakPreview" ', 1)
+            if i.filename == "xl/workbook.xml":
+                d = d.replace(b"<definedNames/>", b"").replace(
+                    b"</sheets>", b'</sheets><definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">'
+                                  b"'\xec\x9d\xbc\xeb\xb0\x98\xec\x82\xac\xed\x95\xad'!$A$1:$F$20</definedName></definedNames>", 1)
+            b.writestr(i, d)
+    with zipfile.ZipFile(src) as z:
+        assert any(b"pageBreakPreview" in z.read(n) for n in z.namelist() if n.startswith("xl/worksheets/"))
+    out = adjust.apply(src, _aje(tmp_path, filled, AJE_ROWS), tmp_path / "반영.xlsx").output
+    with zipfile.ZipFile(out) as z:
+        assert not any(b"pageBreakPreview" in z.read(n) for n in z.namelist() if n.startswith("xl/worksheets/"))
+        assert b"_xlnm.Print_Area" in z.read("xl/workbook.xml")

@@ -742,5 +742,6 @@ def build(workpaper: str | Path, sources: list[str | Path], output: str | Path,
         fill_schedules(pkg, tpl, accounts, b.partners, res)
     pkg.recalc_on_open()
     pkg.drop_cached_values()
+    pkg.normal_view()
     res.output = pkg.save(output)
     return res
