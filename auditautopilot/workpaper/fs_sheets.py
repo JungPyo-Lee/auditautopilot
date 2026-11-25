@@ -224,7 +224,7 @@ def cf_sheet(st, ctx: Ctx) -> bytes:
         g.put(f"{col}{s}", Formula(f"SUM({col}{first}:{col}{last})"), "boldnum")
     fl = s + 1
     g.put(f"C{fl}", "활동별 현금흐름", "bold")
-    g.put(f"G{fl}", "영업 = G+H+I", "right")
+    g.put(f"G{fl}", "영업 = H+I-G", "right")
     g.put(f"I{fl}", Formula(f"H{s}+I{s}-G{s}"), "boldnum")
     g.put(f"K{fl}", Formula(f"K{s}-J{s}"), "boldnum")
     g.put(f"M{fl}", Formula(f"M{s}-L{s}"), "boldnum")
