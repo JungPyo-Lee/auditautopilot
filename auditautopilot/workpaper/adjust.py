@@ -799,6 +799,7 @@ def apply(workpaper: str | Path, aje_path: str | Path, output: str | Path) -> Re
     if not any(x.bs_row for x in rows if x.side != "is"):
         res.notes.append("BS 탭 전기 금액이 없어 현금흐름정산표 검증이 맞지 않을 수 있습니다")
     pkg.recalc_on_open()
+    pkg.normal_view()
     res.output = pkg.save(output)
     return res
 

@@ -27,6 +27,8 @@ WORKSHEET_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.work
 _TOKEN_RE = re.compile(r"[A-Za-z_\\\u0080-￿][\w.\\\u0080-￿]*")
 _FORMULA_RE = re.compile(rb"<(?:\w+:)?f\b[^>]*>(.*?)</(?:\w+:)?f>", re.S)
 _FORMULA1_RE = re.compile(rb"<(?:\w+:)?formula\d?\b[^>]*>(.*?)</", re.S)
+_SHEETVIEW_RE = re.compile(rb"<(?:\w+:)?sheetView\b[^>]*>")
+_VIEW_ATTR_RE = re.compile(rb'\sview="(?:pageBreakPreview|pageLayout)"')
 _SHEET_TAG_RE = re.compile(r"<sheet\b[^>]*?/>")
 _DEFINED_NAME_RE = re.compile(r"<definedName\b([^>]*?)(?:/>|>(.*?)</definedName>)", re.S)
 _ATTR_RE = re.compile(r'([\w:]+)="([^"]*)"')
@@ -363,12 +365,22 @@ class XlsxPackage:
         return n
 
     # ---- 저장 ----
+    def normal_view(self) -> None:
+        """저장할 때 모든 탭을 엑셀 '기본' 보기로 둔다 (페이지 나누기 미리 보기·페이지 레이아웃 해제).
+        미리 보기는 탭이 많으면 엑셀이 느려진다. 인쇄영역(_xlnm.Print_Area)과 쪽 설정은 그대로 남는다."""
+        self._normal_view = True
+
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         targets = {s.name: s.path for s in self.sheets()}
         for name, ed in self._sheet_edits.items():
             self._data[targets[name]] = ed.xml.encode("utf-8")
+        if getattr(self, "_normal_view", False):
+            for sp in targets.values():
+                if sp in self._data:
+                    self._data[sp] = _SHEETVIEW_RE.sub(
+                        lambda m: _VIEW_ATTR_RE.sub(b"", m.group(0)), self._data[sp])
         self._data["xl/workbook.xml"] = self._wb.encode("utf-8")
         self._data["xl/_rels/workbook.xml.rels"] = self._rels.encode("utf-8")
         self._data["[Content_Types].xml"] = self._ct.encode("utf-8")
