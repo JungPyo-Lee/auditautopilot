@@ -24,7 +24,7 @@ import openpyxl
 from ..importers import books as books_mod
 from ..importers.common import squash
 from ..importers.douzone import section_label
-from .xlsx_xml import Formula, XlsxPackage
+from .xlsx_xml import Formula, open_workbook, XlsxPackage
 
 # 계정 묶음 -> (조서 TB 탭의 큰 구분, 묶음 이름 앞부분)
 TARGETS = {
@@ -102,7 +102,7 @@ def _label(v) -> str:
 
 
 def read_template(path: str | Path) -> Template:
-    wb = openpyxl.load_workbook(path)
+    wb = open_workbook(path)
     try:
         if not {"TB", "BS", "IS"} <= set(wb.sheetnames):
             raise ValueError("조서에 TB·BS·IS 탭이 없습니다. 조서 양식 파일을 넣어 주세요.")

@@ -78,6 +78,19 @@ def options(values, selected=None) -> str:
                    for v, lbl in values)
 
 
+def xlsx_sheet_names(data: bytes) -> list[str]:
+    """엑셀 파일을 디스크에 쓰지 않고 시트 이름만 읽는다."""
+    import io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            xml = z.read("xl/workbook.xml").decode("utf-8", "replace")
+    except (zipfile.BadZipFile, KeyError):
+        return []
+    return [html.unescape(n) for n in re.findall(r'<(?:\w+:)?sheet\b[^>]*\bname="([^"]*)"', xml)]
+
+
 def stamped(filename: str, now=None) -> str:
     """내려받는 엑셀·워드 파일 이름 끝에 만든 시각을 붙인다.
     엑셀은 이름이 같은 파일을 동시에 열지 못하고, 받은 폴더에 같은 이름이 있으면 덮어쓰기에서 막히기 때문."""
@@ -414,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
         template = None
         if files:
             import tempfile
-            with tempfile.TemporaryDirectory() as d:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
                 p = Path(d) / "template.xlsx"
                 p.write_bytes(files[0][1])
                 template = pbc.load_template(p)
@@ -638,7 +651,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         sources = [x for i, x in enumerate(files) if i != idx]
         if not sources:
             raise ValueError("합계잔액시산표 등 회사 자료를 함께 고르세요.")
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             paths = []
             for i, (name, data) in enumerate([wp] + sources):
                 if not name.lower().endswith(".xlsx"):
@@ -670,8 +683,8 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         return f"""<h3 id="adjust">수정분개 반영 (정산표·수정후 BS·IS·현금흐름정산표)</h3>
 <p>{tpl_btn}</p>
 <form method="post" action="/e/{eid}/adjust" enctype="multipart/form-data" class="row">
-<label>채운 수정분개<input type="file" name="aje" accept=".xlsx" required></label>
-<label>조서 (비우면 마지막으로 채운 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
+<label>채운 수정분개 양식<input type="file" name="aje" accept=".xlsx" required></label>
+<label>다른 조서에 반영할 때만: 조서 파일 (비우면 마지막으로 채운 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
 <button>수정분개 반영</button></form>
 <p class="mute">조서에 AJE·정산표·수정후BS·수정후IS·현금흐름정산표 탭을 더하고, 리드시트 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿉니다.
 모든 금액이 수식으로 이어져 있고 탭마다 검증 칸(0이어야 함)이 있습니다. 다시 올리면 그 탭들을 새로 만듭니다.</p>{last}
@@ -704,7 +717,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         from ..workpaper import notes
 
         e = self._eng(eid)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             res = notes.request_workbook(self._adjusted_workpaper(e), Path(tmp) / "n.xlsx", e["client_name"])
             data = res.output.read_bytes()
         self._download(data, f"{e['client_name']}_주석자료요청.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
@@ -716,7 +729,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 
         e = self._eng(eid)
         opinion = (self._query().get("opinion") or "적정").strip()
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             out, _ = report.draft(self._adjusted_workpaper(e), Path(tmp) / "r.docx", opinion)
             data = out.read_bytes()
         self._download(data, f"{e['client_name']}_감사보고서_초안.docx",
@@ -736,7 +749,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 
         e = self._eng(eid)
         wp = self._last_workpaper(e)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             out = adjust.aje_template(wp, Path(tmp) / "수정분개양식.xlsx")
             data = out.read_bytes()
         self._download(data, f"{e['client_name']}_수정분개양식.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
@@ -748,29 +761,41 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         from ..workpaper import adjust
 
         e, cfg = self._eng(eid), self.app.cfg()
-        f, files = self._form()
-        ai = (f.get("@aje") or [None])[0]
-        wi = (f.get("@workpaper") or [None])[0]
-        if ai is None:
-            raise ValueError("채운 수정분개 파일을 고르세요.")
-        with tempfile.TemporaryDirectory() as tmp:
-            def put(idx, sub):
-                name, data = files[idx]
-                if not name.lower().endswith(".xlsx"):
-                    raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+        _, files = self._form()
+        # 칸을 바꿔 올려도 되게 시트 이름으로 조서(TB 탭)와 수정분개(수정분개·AJE 탭)를 가린다
+        wps, ajes = [], []
+        for name, data in files:
+            if not data:
+                continue
+            if not name.lower().endswith(".xlsx"):
+                raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+            sheets = xlsx_sheet_names(data)
+            if "TB" in sheets:
+                wps.append((name, data))
+            elif not sheets:
+                raise ValueError(f"{name}: 엑셀(.xlsx) 파일이 아니거나 손상되었습니다.")
+            else:
+                ajes.append((name, data))      # 회사·법인 자체 양식도 '계정과목·차변·대변' 머리글이 있으면 읽는다
+        if not ajes:
+            raise ValueError("채운 수정분개 양식을 골라 주세요. [수정분개 양식 내려받기]로 받은 파일입니다.")
+        if len(ajes) > 1 or len(wps) > 1:
+            raise ValueError("수정분개 양식과 조서는 하나씩만 올려 주세요.")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            def put(item, sub):
+                name, data = item
                 d = Path(tmp) / sub
                 d.mkdir()
                 p = d / Path(name).name
                 p.write_bytes(data)
                 return p
-            aje = put(ai, "aje")
-            wp = put(wi, "wp") if wi is not None else self._last_workpaper(e)
+            aje = put(ajes[0], "aje")
+            wp = put(wps[0], "wp") if wps else self._last_workpaper(e)
             stem = wp.stem.removesuffix("_수정분개반영")
             out = Path(tmp) / "out" / f"{stem}_수정분개반영.xlsx"
             res = adjust.apply(wp, aje, out)
             saved = filing.save_file(self.store, e, cfg, out.name, data=out.read_bytes(), received_on=self.app.today(),
                                      source="수정분개", category="조서")
-            filing.save_file(self.store, e, cfg, files[ai][0], data=files[ai][1], received_on=self.app.today(),
+            filing.save_file(self.store, e, cfg, ajes[0][0], data=ajes[0][1], received_on=self.app.today(),
                              source="수정분개", category="조서")
         self.store.set_setting(f"adjust:{e['id']}", {
             "made_at": datetime.now().replace(microsecond=0).isoformat(" "), "path": str(saved["path"]),
@@ -926,7 +951,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         raw_seed = (f.get("seed") or "").strip()
         if raw_seed and not raw_seed.isdigit():
             raise ValueError("표본 시드는 숫자로 넣어 주세요.")
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             paths = []
             for i, (name, data) in enumerate(files):
                 if not name.lower().endswith(".xlsx"):
@@ -1058,7 +1083,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         paths = confirmations.stored_paths(self.store, e["id"])
         if not paths:
             raise ValueError("먼저 전자조회에서 가져오거나 회신현황 엑셀을 올려 주세요.")
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             out = Path(tmp) / "out.xlsx"
             res = confirm.build(paths)
             a = confirmations.assess(confirmations.latest(self.store, e["id"]),
@@ -1083,7 +1108,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         _, files = self._form()
         if not files:
             raise ValueError("회신현황 엑셀 파일을 고르세요.")
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             paths = []
             for i, (name, data) in enumerate(files):
                 if not name.lower().endswith(".xlsx"):

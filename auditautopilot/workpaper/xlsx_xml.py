@@ -708,3 +708,62 @@ class SheetXml:
                       lambda m: self._shift_formulas_in(m.group(0), before, count, sheet, own=False),
                       data.group(1), flags=re.S)
         self.xml = self.xml[:data.start(1)] + body + self.xml[data.end(1):]
+
+
+_XF_COUNT_RE = re.compile(rb"<(?:\w+:)?cellXfs\b[^>]*>(.*?)</(?:\w+:)?cellXfs>", re.S)
+_CELL_STYLE_RE = re.compile(rb"<(?:\w+:)?c\b[^>]*?\ss=\"(\d+)\"")
+
+
+def repair_styles(data: bytes) -> bytes:
+    """셀이 가리키는 서식 번호가 서식 목록(cellXfs)보다 크면 기본 서식을 덧붙인다.
+
+    다른 프로그램(또는 예전 버전)이 저장한 파일 중에 이런 것이 있으면 엑셀은 열지만
+    openpyxl은 IndexError로 멈춘다. 모자란 만큼 기본 서식으로 채우면 값은 그대로 읽힌다.
+    """
+    import io
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    try:
+        styles = src.read("xl/styles.xml")
+    except KeyError:
+        return data
+    m = _XF_COUNT_RE.search(styles)
+    if not m:
+        return data
+    have = len(re.findall(rb"<(?:\w+:)?xf\b", m.group(1)))
+    need = 0
+    for n in src.namelist():
+        if n.startswith("xl/worksheets/") and n.endswith(".xml"):
+            for s in _CELL_STYLE_RE.findall(src.read(n)):
+                need = max(need, int(s) + 1)
+    if need <= have:
+        return data
+    pad = b'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' * (need - have)
+    body = m.group(0)
+    end = body.rindex(b"</")
+    new = re.sub(rb'(<(?:\w+:)?cellXfs\b[^>]*?)\scount="\d+"', rb"\1", body[:end] + pad + body[end:], count=1)
+    styles = styles[:m.start()] + new + styles[m.end():]
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            dst.writestr(info, styles if info.filename == "xl/styles.xml" else src.read(info.filename))
+    return out.getvalue()
+
+
+def open_workbook(path: str | Path, **kw):
+    """openpyxl.load_workbook 대신 쓴다.
+
+    파일을 먼저 메모리로 읽으므로 읽다가 오류가 나도 파일이 잠긴 채 남지 않는다 (윈도우 WinError 32).
+    서식 번호가 깨진 파일은 repair_styles로 고쳐서 다시 연다.
+    """
+    import io
+
+    import openpyxl
+
+    data = Path(path).read_bytes()
+    try:
+        return openpyxl.load_workbook(io.BytesIO(data), **kw)
+    except IndexError:
+        return openpyxl.load_workbook(io.BytesIO(repair_styles(data)), **kw)
+    except zipfile.BadZipFile:
+        raise ValueError(f"{Path(path).name}: 엑셀(.xlsx) 파일이 아니거나 손상되었습니다.") from None

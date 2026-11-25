@@ -3,6 +3,7 @@
 import io
 import shutil
 import subprocess
+import urllib.parse
 
 import openpyxl
 import pytest
@@ -162,3 +163,46 @@ def test_cli_and_web(filled, tmp_path, capsys, server, store):  # noqa: F811
     assert st == 200 and "정산표" in openpyxl.load_workbook(io.BytesIO(x)).sheetnames
     page = _open(base + f"/e/{eid}")[2].decode()
     assert "수정분개 양식 내려받기" in page and "수정분개반영.xlsx" in page
+
+
+def test_web_swapped_or_wrong_uploads(filled, tmp_path, server, store):  # noqa: F811
+    from auditautopilot.manage.web import xlsx_sheet_names
+    aje = _aje(tmp_path, filled, AJE_ROWS)
+    assert "TB" in xlsx_sheet_names(filled.read_bytes()) and xlsx_sheet_names(b"not zip") == []
+    base, _ = server
+    cid = store.add_client("C013", "다라상사", "박담당", "park@example.com")
+    eid = store.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
+    store.set_setting(f"leadsheet:{eid}", {"made_at": "x", "path": str(filled), "lines": []})
+    # 수정분개 양식을 조서 칸에, 조서를 수정분개 칸에 바꿔 올려도 반영된다
+    data, hdr = _multipart([], [("aje", "조서.xlsx", filled.read_bytes()),
+                                ("workpaper", "그린_수정분개양식.xlsx", aje.read_bytes())])
+    st, h, _ = _open(base + f"/e/{eid}/adjust", data, hdr)
+    assert st == 303 and store.get_setting(f"adjust:{eid}")["path"].endswith("조서_수정분개반영.xlsx")
+    # 수정분개 양식만 조서 칸에 올려도 마지막 조서로 반영한다
+    store.set_setting(f"adjust:{eid}", None)
+    data, hdr = _multipart([], [("workpaper", "그린_수정분개양식.xlsx", aje.read_bytes())])
+    st, h, _ = _open(base + f"/e/{eid}/adjust", data, hdr)
+    assert st == 303 and store.get_setting(f"adjust:{eid}")["path"].endswith("조서_리드시트_수정분개반영.xlsx")
+    # 조서만 올리면 수정분개 양식을 고르라고 알려 준다
+    data, hdr = _multipart([], [("aje", "조서.xlsx", filled.read_bytes())])
+    st, h, _ = _open(base + f"/e/{eid}/adjust", data, hdr)
+    assert st == 303 and "수정분개 양식을 골라" in urllib.parse.unquote(h["Location"])
+
+
+def test_open_workbook_repairs_bad_style_index(filled, tmp_path):
+    """서식 번호가 서식 목록보다 큰 파일도 열린다 (다른 프로그램이 저장한 파일)."""
+    import re
+    import zipfile
+    from auditautopilot.workpaper.xlsx_xml import open_workbook
+    bad = tmp_path / "bad.xlsx"
+    with zipfile.ZipFile(filled) as src, zipfile.ZipFile(bad, "w") as dst:
+        for i in src.infolist():
+            b = src.read(i.filename)
+            if i.filename == "xl/worksheets/sheet3.xml":
+                b = re.sub(rb'<c r="([A-Z]+\d+)"( s="\d+")?', rb'<c r="\1" s="999"', b, count=1)
+            dst.writestr(i, b)
+    with pytest.raises(IndexError):
+        openpyxl.load_workbook(bad)
+    assert "TB" in open_workbook(bad).sheetnames
+    res = adjust.apply(bad, _aje(tmp_path, filled, AJE_ROWS), tmp_path / "반영.xlsx")
+    assert res.entries == 1
