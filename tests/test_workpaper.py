@@ -98,3 +98,36 @@ def test_other_parts_are_copied_unchanged(workpaper_file, tmp_path):
 def test_refuses_to_overwrite_source(workpaper_file):
     with pytest.raises(ValueError):
         prepare_workpaper(workpaper_file, workpaper_file)
+
+
+def test_classify_front_helpers_and_reports():
+    roles = {r.name: (r.kind, r.index) for r in classify_sheets(
+        ["일반사항", "PL", "조회서", "정산표", "A", "A1000", "C", "C1000", "금융평잔", "E", "E1000", "E100",
+         "보고서 BS", "GG1000"],
+        ["A", "C", "E", "E100", "GG"])}
+    assert roles["PL"] == roles["조회서"] == ("front", None)          # 첫 인덱스 탭 앞은 공통
+    assert roles["금융평잔"] == ("detail", "C")                        # 인덱스 사이 보조 탭은 앞 인덱스
+    assert roles["E1000"] == ("lead", "E") and roles["E100"] == ("detail", "E100")
+    assert roles["정산표"] == roles["보고서 BS"] == ("front", None)
+
+
+def test_assign_matrix_and_override(workpaper_file, tmp_path):
+    from auditautopilot.workpaper.prepare import Assignment, people, read_assign_matrix
+    wb = openpyxl.load_workbook(workpaper_file)
+    m = wb.create_sheet("assign", 1)
+    m.append(["Job Assignments"])
+    m.append(["계정과목", None, "박감사", "최감사"])
+    m.append(["매출채권", None, "V", None])
+    m.append(["현금및현금성자산", None, None, "V"])
+    m.append(["매입채무", None, "V", "V"])
+    wb.save(workpaper_file)
+    a = {x.index: x.assignee for x in read_assign_matrix(workpaper_file, read_assignments(workpaper_file))}
+    assert a == {"A": "최감사", "AA": "박감사, 최감사", "C": "박감사", "E100": "홍길동"}
+    items = [Assignment("A", "현금", "박감사"), Assignment("C", "매출채권", "최감사, 박감사")]
+    assert people(items) == ["박감사", "최감사"]
+    out = tmp_path / "mine.xlsx"
+    prepare_workpaper(workpaper_file, out, assignee="최감사", assignments=items)
+    states, wb = _states(out)
+    assert states["C1000"] == states["C1100"] == "visible"
+    assert states["A1000"] == states["AA1000"] == states["E100"] == "hidden"     # AA·E100은 배정 표에 없음
+    assert states["assign"] == "visible" and wb.sheetnames.count("목차") == 1

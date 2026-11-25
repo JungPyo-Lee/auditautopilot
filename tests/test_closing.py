@@ -204,3 +204,30 @@ def test_step_buttons_list_import_and_question_categories(server, store, tmp_pat
     questions.add(store, eid, "직접 쓴 질문")
     page = _open(base + f"/e/{eid}")[2].decode()
     assert "data-cat='증감과다'" in page and "data-cat='이상전표'" in page and "직접 작성 1</button>" in page
+
+
+def test_web_assignee_workpaper(workpaper_file, server, store):  # noqa: F811
+    import urllib.parse
+    base, _ = server
+    cid = store.add_client("C016", "가나상사", "김담당", "kim@example.com")
+    eid = store.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "담당자별 조서" in page and "[조서 채우기]를 하면" in page
+    store.set_setting(f"leadsheet:{eid}", {"made_at": "x", "path": str(workpaper_file), "lines": []})
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "홍길동 조서" in page and "김감사 조서" in page and "name='who_AA'" in page
+    # 담당자를 바꿔 저장하면 그 배정으로 조서를 만든다
+    st, hdr, _ = _open(base + f"/e/{eid}/assign", {"who_A": "박감사", "who_AA": "김감사", "who_C": "박감사, 김감사",
+                                                    "who_E100": "홍길동"})
+    assert st == 303 and "#assign" in hdr["Location"]
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "박감사 조서" in page
+    st, hdr, body = _open(base + f"/e/{eid}/mine.xlsx?who=" + urllib.parse.quote("박감사"))
+    assert st == 200 and "%EB%B0%95%EA%B0%90%EC%82%AC" in hdr["Content-Disposition"]
+    wb = openpyxl.load_workbook(io.BytesIO(body))
+    states = {ws.title: ws.sheet_state for ws in wb.worksheets}
+    assert states["A1000"] == states["C1000"] == "visible" and states["AA1000"] == "hidden"
+    st, _, body = _open(base + f"/e/{eid}/mine.xlsx")
+    assert st == 200 and openpyxl.load_workbook(io.BytesIO(body))["AA1000"].sheet_state == "visible"
+    _open(base + f"/e/{eid}/assign", {"reset": "1"})
+    assert "홍길동 조서" in _open(base + f"/e/{eid}")[2].decode()
