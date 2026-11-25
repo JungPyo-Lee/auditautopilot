@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 
-import pandas as pd
-
 from .importers.common import squash
 
 # 화면 초기값 예시 (퍼센트). 법인 정책에 맞게 바꾼다.
@@ -46,8 +44,8 @@ class MaterialityResult:
     trivial: float
     rounding_unit: int
 
-    def as_table(self) -> pd.DataFrame:
-        rows = [
+    def as_rows(self) -> list[dict]:
+        items = [
             ("기준", self.benchmark),
             ("기준 금액", self.benchmark_amount),
             ("기준 기간(개월)", self.months),
@@ -60,7 +58,7 @@ class MaterialityResult:
             ("명백히 사소한 금액", self.trivial),
             ("절사 단위", self.rounding_unit),
         ]
-        return pd.DataFrame(rows, columns=["항목", "값"])
+        return [{"항목": k, "값": v} for k, v in items]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -116,10 +114,10 @@ def compute(
     )
 
 
-def find_benchmark_amount(fs: pd.DataFrame, benchmark: str, column: str = "current") -> float | None:
-    """재무제표(DataFrame: name, current, prior)에서 기준 금액을 찾는다. 없으면 None."""
+def find_benchmark_amount(fs: list[dict], benchmark: str, column: str = "current") -> float | None:
+    """재무제표 행(name, current, prior)에서 기준 금액을 찾는다. 없으면 None."""
     keywords = _BENCHMARK_KEYWORDS.get(benchmark, [benchmark])
-    for _, row in fs.iterrows():
+    for row in fs:
         name = squash(row["name"])
         if any(k in name for k in keywords):
             return float(row[column])

@@ -6,6 +6,8 @@
   재무상태표는 계정 금액도 집계금액 열에, 손익계산서는 계정 금액이 금액 열에 있다.
 - 분개장 시트: 머리글 2줄. 둘째 줄이 실제 열 이름이다.
 - 숫자 이름 시트(예: '118'): 그 계정의 거래처원장. 코드, 거래처, 등록번호, ... 전기이월, 차변, 대변, 잔액.
+
+각 표는 dict 목록이며 키는 common.py의 *_COLUMNS 를 따른다.
 """
 
 from __future__ import annotations
@@ -14,22 +16,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
-import pandas as pd
 
 from .common import (
-    FS_COLUMNS, JOURNAL_COLUMNS, PARTNER_COLUMNS, TB_COLUMNS,
     cell, column_positions, find_header_row, mask_reg_no, normalize_code,
-    parse_account_label, squash, to_number,
+    parse_account_label, parse_date, squash, to_number,
 )
+
+Rows = list[dict]
 
 
 @dataclass
 class SemusarangBundle:
-    tb: pd.DataFrame
-    bs: pd.DataFrame
-    pl: pd.DataFrame
-    journal: pd.DataFrame
-    partners: pd.DataFrame
+    tb: Rows
+    bs: Rows
+    pl: Rows
+    journal: Rows
+    partners: Rows
     periods: dict[str, str] = field(default_factory=dict)
 
 
@@ -37,7 +39,7 @@ def _rows(ws) -> list[tuple]:
     return [tuple(r) for r in ws.iter_rows(values_only=True)]
 
 
-def read_tb(rows: list[tuple]) -> pd.DataFrame:
+def read_tb(rows: list[tuple]) -> Rows:
     header = find_header_row(rows, ["잔액", "합계", "계정과목"])
     pos = column_positions(rows[header])
     d_bal, c_bal = pos["잔액"][0], pos["잔액"][-1]
@@ -57,11 +59,10 @@ def read_tb(rows: list[tuple]) -> pd.DataFrame:
             "credit_total": to_number(cell(row, c_tot)), "credit_balance": cb,
             "balance": db - cb,
         })
-    return pd.DataFrame(records, columns=TB_COLUMNS)
+    return records
 
 
-def read_fs(rows: list[tuple]) -> tuple[pd.DataFrame, dict[str, str]]:
-    """재무상태표·손익계산서. 계정 행은 '금액', 소계 행은 '집계금액' 열을 쓴다."""
+def read_fs(rows: list[tuple]) -> tuple[Rows, dict[str, str]]:
     header = find_header_row(rows, ["과목", "금액"])
     periods: dict[str, str] = {}
     if header > 0:
@@ -77,12 +78,11 @@ def read_fs(rows: list[tuple]) -> tuple[pd.DataFrame, dict[str, str]]:
             continue
         code, name = parse_account_label(label)
         # 재무상태표는 계정 금액도 '집계금액' 열에, 손익계산서는 '금액' 열에 들어 있다.
-        # 두 열 중 값이 있는 쪽을 쓴다.
         current = to_number(cell(row, 1)) or to_number(cell(row, 2))
         prior = to_number(cell(row, 3)) or to_number(cell(row, 4))
         records.append({"code": code, "name": name, "is_account": bool(code),
                         "current": current, "prior": prior})
-    return pd.DataFrame(records, columns=FS_COLUMNS), periods
+    return records, periods
 
 
 def _nearest_before(positions: list[int], limit: int) -> int | None:
@@ -90,7 +90,7 @@ def _nearest_before(positions: list[int], limit: int) -> int | None:
     return before[-1] if before else None
 
 
-def read_journal(rows: list[tuple]) -> pd.DataFrame:
+def read_journal(rows: list[tuple]) -> Rows:
     header = find_header_row(rows, ["전표번호", "차변", "대변", "거래처명"])
     pos = column_positions(rows[header])
     codes = pos.get("코드", [])
@@ -105,7 +105,7 @@ def read_journal(rows: list[tuple]) -> pd.DataFrame:
         if cell(row, date_col) is None:
             continue
         records.append({
-            "date": cell(row, date_col),
+            "date": parse_date(cell(row, date_col)),
             "voucher_no": str(cell(row, pos["전표번호"][0]) or "").strip(),
             "side": str(cell(row, pos["구분"][0]) or "").strip(),
             "account_code": normalize_code(cell(row, acc_code_col)),
@@ -116,12 +116,10 @@ def read_journal(rows: list[tuple]) -> pd.DataFrame:
             "partner": str(cell(row, partner_col) or "").strip(),
             "memo": str(cell(row, memo_col) or "").strip(),
         })
-    df = pd.DataFrame(records, columns=JOURNAL_COLUMNS)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    return df
+    return records
 
 
-def read_partner_ledger(rows: list[tuple], account_code: str) -> pd.DataFrame:
+def read_partner_ledger(rows: list[tuple], account_code: str) -> Rows:
     header = find_header_row(rows, ["코드", "거래처", "잔액"])
     pos = column_positions(rows[header])
     records = []
@@ -139,26 +137,27 @@ def read_partner_ledger(rows: list[tuple], account_code: str) -> pd.DataFrame:
             "credit": to_number(cell(row, pos["대변"][0])),
             "balance": to_number(cell(row, pos["잔액"][0])),
         })
-    return pd.DataFrame(records, columns=PARTNER_COLUMNS)
+    return records
 
 
 def load(path: str | Path) -> SemusarangBundle:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         names = wb.sheetnames
-        tb = read_tb(_rows(wb["TB"])) if "TB" in names else pd.DataFrame(columns=TB_COLUMNS)
+        tb = read_tb(_rows(wb["TB"])) if "TB" in names else []
         periods: dict[str, str] = {}
-        bs = pl = pd.DataFrame(columns=FS_COLUMNS)
+        bs: Rows = []
+        pl: Rows = []
         if "BS" in names:
             bs, periods = read_fs(_rows(wb["BS"]))
         if "PL" in names:
             pl, pl_periods = read_fs(_rows(wb["PL"]))
             periods = periods or pl_periods
-        journal = (read_journal(_rows(wb["분개장"])) if "분개장" in names
-                   else pd.DataFrame(columns=JOURNAL_COLUMNS))
-        ledgers = [read_partner_ledger(_rows(wb[n]), n) for n in names if n.strip().isdigit()]
-        partners = (pd.concat(ledgers, ignore_index=True) if ledgers
-                    else pd.DataFrame(columns=PARTNER_COLUMNS))
+        journal = read_journal(_rows(wb["분개장"])) if "분개장" in names else []
+        partners: Rows = []
+        for n in names:
+            if n.strip().isdigit():
+                partners.extend(read_partner_ledger(_rows(wb[n]), n))
     finally:
         wb.close()
     return SemusarangBundle(tb=tb, bs=bs, pl=pl, journal=journal, partners=partners, periods=periods)

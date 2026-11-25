@@ -12,15 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import openpyxl
-import pandas as pd
 
 from .common import (
-    JOURNAL_COLUMNS, cell, column_positions, find_header_row, normalize_code,
-    squash, to_number,
+    cell, column_positions, find_header_row, normalize_code, parse_date, squash, to_number,
 )
 
 
-def read_journal_rows(rows: list[tuple]) -> pd.DataFrame:
+def read_journal_rows(rows: list[tuple]) -> list[dict]:
     header = find_header_row(rows, ["전표일자", "전표번호", "차변", "대변"])
     pos = column_positions(rows[header])
     codes = sorted(pos.get("Code", []) + pos.get("코드", []))
@@ -31,11 +29,11 @@ def read_journal_rows(rows: list[tuple]) -> pd.DataFrame:
     memo_col = pos.get("적요", [None])[0]
     records = []
     for row in rows[header + 1:]:
-        date = cell(row, pos["전표일자"][0])
-        if date is None or not str(date).strip():
+        raw_date = cell(row, pos["전표일자"][0])
+        if raw_date is None or not str(raw_date).strip():
             continue
         records.append({
-            "date": date,
+            "date": parse_date(raw_date),
             "voucher_no": str(cell(row, pos["전표번호"][0]) or "").strip(),
             "side": str(cell(row, pos["구분"][0]) or "").strip(),
             "account_code": normalize_code(cell(row, acc_code_col)),
@@ -46,12 +44,10 @@ def read_journal_rows(rows: list[tuple]) -> pd.DataFrame:
             "partner": str(cell(row, partner_col) or "").strip(),
             "memo": str(cell(row, memo_col) or "").strip(),
         })
-    df = pd.DataFrame(records, columns=JOURNAL_COLUMNS)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    return df
+    return records
 
 
-def load_journal(path: str | Path) -> pd.DataFrame:
+def load_journal(path: str | Path) -> list[dict]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb.worksheets[0]
