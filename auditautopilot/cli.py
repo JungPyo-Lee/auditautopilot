@@ -8,6 +8,7 @@
   python -m auditautopilot materiality --benchmark 매출액 --amount 18669084279 --overall-pct 1
   python -m auditautopilot analytics 재무제표등.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
   python -m auditautopilot sample 재무제표등.xlsx --account 108 --method mus --n 25 -o 표본.xlsx
+  python -m auditautopilot serve            (관리 화면: http://127.0.0.1:8765)
 """
 
 from __future__ import annotations
@@ -171,6 +172,13 @@ def cmd_sample(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    from .manage.web import serve
+
+    serve(args.db, host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="auditautopilot", description="회계감사 업무 자동화 도구")
     sub = p.add_subparsers(dest="command", required=True)
@@ -223,6 +231,14 @@ def build_parser() -> argparse.ArgumentParser:
     sa.add_argument("--seed", type=int)
     sa.add_argument("-o", "--output", required=True)
     sa.set_defaults(func=cmd_sample)
+
+    sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
+    sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="기본은 이 PC에서만 접속. 팀 공유는 0.0.0.0 (로그인 기능 전이므로 사무실 내부망에서만)")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--no-browser", action="store_true", help="브라우저를 자동으로 열지 않는다")
+    sv.set_defaults(func=cmd_serve)
     return p
 
 
