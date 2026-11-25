@@ -34,13 +34,15 @@ COLUMNS = {
     "agree": ["일치여부", "일치"],
     "currency": ["통화", "통화코드"],
     "label": ["구분", "계정", "계정과목", "조회항목"],
-    "sent": ["발송금액", "조회금액", "장부금액"],
+    "sent": ["발송금액", "조회금액", "장부금액", "금액"],
     "replied": ["회신금액"],
     "diff": ["차이금액", "차이"],
     "sent_at": ["최초발송일시", "발송일시", "발송일"],
+    "last_sent_at": ["최종발송일시"],
+    "send_count": ["발송횟수", "발송횟수(요청횟수)"],
     "replied_at": ["회신일시", "회신일"],
 }
-REQUIRED = ("partner", "label", "sent", "replied")
+REQUIRED = ("partner", "label", "sent")   # 미회신현황에는 회신금액 열이 없다
 
 # 영문 구분 → 계정과목 (해외 거래처는 영문으로 나온다)
 ENGLISH = {
@@ -113,7 +115,7 @@ def _header(rows: list[tuple]) -> tuple[int, dict[str, int]]:
                     break
         if all(k in found for k in REQUIRED):
             return i, found
-    raise ValueError("전자조회 회신현황 형식이 아닙니다 (기업명·구분·발송금액·회신금액 머리글을 찾지 못함).")
+    raise ValueError("전자조회 회신현황 형식이 아닙니다 (기업명·구분·발송금액 머리글을 찾지 못함).")
 
 
 def read_status_rows(rows: list[tuple]) -> list[dict]:
@@ -153,6 +155,8 @@ def read_status_rows(rows: list[tuple]) -> list[dict]:
             "status": status,
             "sent_at": _when(g("sent_at")),
             "replied_at": replied_at,
+            "last_sent_at": _when(g("last_sent_at")),
+            "send_count": int(to_number(g("send_count"))) if g("send_count") not in (None, "") else None,
             "note": "",
         }
         if status == STATUS_DIFF and replied and sent and (abs(replied / sent) > 10 or abs(sent / replied) > 10):
@@ -193,7 +197,10 @@ class Result:
                     d["장부잔액"] = r["book"]
                     d["장부-발송 차이"] = r["book_diff"]
                 d.update({"담당자": r["contact"], "이메일": r["email"], "발송일시": r["sent_at"],
-                          "회신일시": r["replied_at"], "확인할 점": r["note"]})
+                          "회신일시": r["replied_at"]})
+                if r.get("send_count") is not None or r.get("last_sent_at"):
+                    d.update({"최종발송일시": r.get("last_sent_at"), "발송횟수": r.get("send_count")})
+                d["확인할 점"] = r["note"]
                 d.update(extra or {})
                 out.append(d)
             return out
@@ -275,7 +282,7 @@ def build(paths) -> Result:
         rows = _rows_of(p)
         (status if is_status_file(rows) else others).append((p, rows))
     if not status:
-        raise ValueError("전자조회 회신현황 파일이 없습니다 (기업명·구분·발송금액·회신금액 머리글이 있는 파일).")
+        raise ValueError("전자조회 회신현황 파일이 없습니다 (기업명·구분·발송금액 머리글이 있는 파일).")
     data = [r for _, rows in status for r in read_status_rows(rows)]
     books = books_mod.load([p for p, _ in others]) if others else None
     res = reconcile(data, books)
