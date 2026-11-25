@@ -1,4 +1,4 @@
-"""수정분개를 조서에 반영한다: 수정분개 양식 → AJE·정산표·수정후BS·수정후IS·현금흐름정산표 탭.
+"""수정분개를 조서에 반영한다: 수정분개 양식 → AJE·정산표·수정후BS·수정후IS·정산표-CF·보고서 탭.
 
 흐름
 1. aje_template(조서) : 조서 TB 탭 계정과목으로 수정분개 양식(.xlsx)을 만든다 (계정과목은 목록에서 고름).
@@ -6,8 +6,7 @@
    - AJE        : 올린 수정분개 그대로 (번호·일자·구분·계정과목·차변·대변·적요·근거)
    - 정산표     : TB 탭 잔액(수정전) + AJE(SUMIFS) = 수정후, 손익계산서·재무상태표 칸으로 나누고 당기순이익으로 대차를 맞춘다
    - 수정후BS·수정후IS : 정산표를 가리키는 수식으로 묶음별 소계·총계, 전기는 BS·IS 탭에서
-   - 현금흐름정산표 : 간접법. 당기순이익 + 현금 없는 손익 + 재무상태표 계정별 증감(당기-전기)을 영업·투자·재무로 나누고
-                     기초·기말 현금과 맞는지 검증 칸을 둔다
+   - 정산표-CF·보고서 BS·보고서IS·자본변동표·보고서현금흐름표 : 회계사 조서 양식 그대로 (fs_sheets.py)
    - 리드시트(○1000) I열(Audited F/S) = H열(G/L) + 정산표의 수정분개 금액
    모든 숫자는 수식으로 이어져 회계사가 셀을 눌러 따라가며 검증할 수 있다.
 
@@ -28,7 +27,8 @@ from ..importers.common import squash, to_number
 from .leadsheet import BS_SIDES, TARGETS, is_contra, read_template
 from .xlsx_xml import Formula, open_workbook, XlsxPackage, column_letter, grid_xml
 
-NEW_TABS = ("AJE", "정산표", "수정후BS", "수정후IS", "현금흐름정산표")
+NEW_TABS = ("AJE", "정산표", "수정후BS", "수정후IS", "정산표-CF", "보고서 BS", "보고서IS", "자본변동표", "보고서현금흐름표")
+OLD_TABS = ("현금흐름정산표",)   # 전에 만들던 탭: 다시 반영하면 지운다
 AJE_HEADERS = ["번호", "일자", "구분", "계정과목", "차변", "대변", "적요", "근거 조서", "새 계정 묶음"]
 AJE_KINDS = ("수정", "재분류")
 
@@ -430,17 +430,20 @@ def _bs_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[byt
     group_total: dict[int, int] = {}
     retained_rows: list[int] = []
     ni_row = None
+    order: list[tuple] = []     # (종류, 내용, 행): 정산표-CF·보고서 탭이 같은 순서로 쓴다
     for major in BS_MAJORS:
         items = [x for x in rows if x.major == major]
         if not items:
             continue
         g.put(f"A{r}", major, "bold")
+        order.append(("major", major, r))
         head = r
         r += 1
         subs = []
         for grow in dict.fromkeys(x.group_row for x in items):
             gi = [x for x in items if x.group_row == grow]
             g.put(f"A{r}", f"  {gi[0].group_label}", "bold")
+            order.append(("group", gi[0], r))
             gh = r
             r += 1
             for x in gi:
@@ -451,12 +454,14 @@ def _bs_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[byt
                 g.put(f"C{r}", Formula(f"N(BS!F{x.bs_row})") if x.bs_row else None, "num")
                 g.put(f"D{r}", Formula(f"B{r}-C{r}"), "num")
                 acc_row[x.tb_row] = r
+                order.append(("acc", x, r))
                 r += 1
             if gi[0].key == "retained":
                 g.put(f"A{r}", "    당기순이익(손실) (정산표)")
                 g.put(f"B{r}", Formula(f"{ws}!J{w['ni']}"), "num")
                 g.put(f"D{r}", Formula(f"B{r}-C{r}"), "num")
                 ni_row = r
+                order.append(("ni", None, r))
                 r += 1
                 retained_rows.append(gh)
             for col in "BCD":
@@ -492,7 +497,7 @@ def _bs_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[byt
         g.put(f"A{r + 1}", "이익잉여금 묶음이 없어 당기순이익 줄을 넣지 못했습니다. 대차가 맞지 않으면 확인해 주세요.")
     return grid_xml(g.cells, [34, 18, 18, 18], freeze="B5"), {
         "acc": acc_row, "group": group_total, "major": major_total, "totals": totals, "ni": ni_row,
-        "retained": retained_rows}
+        "retained": retained_rows, "order": order}
 
 
 def _is_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[bytes, dict]:
@@ -505,6 +510,7 @@ def _is_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[byt
     r = 5
     sec: dict[str, int] = {}
     acc_row: list[tuple[str, int]] = []
+    by_key: dict[str, list[tuple[TbRow, int]]] = {}
     for key, label in IS_ORDER:
         keys = {key} | (MFG_KEYS if key == "cogs" else set())
         items = [x for x in rows if x.side == "is" and x.key in keys]
@@ -520,6 +526,7 @@ def _is_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[byt
             g.put(f"C{r}", Formula(f'SUMIF(IS!$C:$C,"{x.name}",IS!$F:$F)'), "num")
             g.put(f"D{r}", Formula(f"B{r}-C{r}"), "num")
             acc_row.append((x.name, r))
+            by_key.setdefault(key, []).append((x, r))
             r += 1
         for col in "BCD":
             g.put(f"{col}{head}", Formula(f"SUM({col}{head + 1}:{col}{r - 1})") if r - 1 > head else 0, "boldnum")
@@ -553,7 +560,7 @@ def _is_sheet(st, rows: list[TbRow], wpos: dict[int, int], w: dict) -> tuple[byt
     g.put(f"B{r}", Formula(f"ROUND(B{sec['ni']}-{ws}!J{w['ni']},0)"), "check")
     if other:
         g.put(f"A{r + 1}", "묶음을 못 정한 손익 계정: " + ", ".join(x.name for x in other))
-    return grid_xml(g.cells, [40, 18, 18, 18], freeze="B5"), {"sec": sec, "acc": acc_row}
+    return grid_xml(g.cells, [40, 18, 18, 18], freeze="B5"), {"sec": sec, "acc": acc_row, "by_key": by_key}
 
 
 def _is_cash(x: TbRow) -> bool:
@@ -583,134 +590,6 @@ def _cf_category(x: TbRow) -> str:
     return "op"     # ar, lt_ar, inventory, tax_asset, ap, lt_ap, retire, provision
 
 
-def _cf_sheet(st, rows: list[TbRow], bs: dict, is_: dict) -> tuple[bytes, dict]:
-    g = Grid(st)
-    b, i_ = _q("수정후BS"), _q("수정후IS")
-    g.put("A1", "현금흐름정산표 (간접법)", "title")
-    g.put("A2", "수정후BS·수정후IS를 가리키는 수식입니다. 재무상태표 계정마다 증감(당기-전기)이 한 번씩 들어가므로 "
-                "아래 검증 칸이 0이면 빠진 계정이 없습니다. 분류·현금 없는 손익은 회계사가 검토해 고치세요.")
-    g.row(4, ["구분", "금액", "산식 설명"], "head")
-    r = 5
-    noncash_used: dict[int, list[str]] = {}   # 재무상태표 TB 행 -> 빼 줄 손익 셀
-
-    def is_cells(word: str) -> list[str]:
-        return [f"{i_}!B{row}" for name, row in is_["acc"] if word in name]
-
-    sections: dict[str, int] = {}
-    g.put(f"A{r}", "Ⅰ. 영업활동으로 인한 현금흐름", "bold")
-    sections["op"] = r
-    r += 1
-    g.put(f"A{r}", "  1. 당기순이익(손실)")
-    g.put(f"B{r}", Formula(f"{i_}!B{is_['sec']['ni']}"), "num")
-    g.put(f"C{r}", "수정후IS 당기순이익")
-    op_lines = [r]
-    r += 1
-    bs_rows = [x for x in rows if x.side != "is"]
-    add_lines = []
-    for word, partners, sign in NONCASH:
-        cells = is_cells(word)
-        if not cells:
-            continue
-        if partners is None:
-            target = [x for x in bs_rows if x.key == "ppe" and not x.contra]
-        else:
-            target = [x for x in bs_rows if any(p in x.name for p in partners)]
-        if not target:
-            continue
-        expr = "+".join(cells)
-        g.put(f"A{r}", f"  {'가산' if sign > 0 else '차감'}: {word}")
-        g.put(f"B{r}", Formula(f"{'' if sign > 0 else '-'}({expr})"), "num")
-        g.put(f"C{r}", f"현금 없는 손익 → '{target[0].name}' 증감에서 {'빼' if sign > 0 else '더해'} 줌")
-        noncash_used.setdefault(target[0].tb_row, []).append(("-" if sign > 0 else "+") + f"({expr})")
-        add_lines.append(r)
-        r += 1
-    op_lines += add_lines
-
-    def bs_line(x: TbRow) -> str | None:
-        row = bs["acc"].get(x.tb_row)
-        if row is None:
-            return None
-        base = f"-({b}!D{row})" if x.side == "asset" else f"{b}!D{row}"
-        return base + "".join(noncash_used.get(x.tb_row, []))
-
-    cat_lines: dict[str, list[int]] = {"op": [], "inv": [], "fin": [], "other": []}
-    retained_done = False
-    by_cat: dict[str, list] = {"op": [], "inv": [], "fin": [], "other": []}
-    for x in bs_rows:
-        if _is_cash(x):
-            continue
-        if x.key == "retained":
-            if not retained_done:
-                by_cat["fin"].append(("retained", x))
-                retained_done = True
-            continue
-        by_cat[_cf_category(x)].append(("acc", x))
-
-    def write(cat: str, header: str | None):
-        nonlocal r
-        if header:
-            g.put(f"A{r}", header)
-            r += 1
-        for kind, x in by_cat[cat]:
-            if kind == "retained":
-                gh = next(iter(bs["retained"]), None)
-                if gh is None:
-                    continue
-                g.put(f"A{r}", "    이익잉여금 증감(당기순이익 제외: 배당 등)")
-                g.put(f"B{r}", Formula(f"{b}!D{gh}-{i_}!B{is_['sec']['ni']}"), "num")
-                g.put(f"C{r}", "수정후BS 이익잉여금 묶음 증감 - 당기순이익")
-            else:
-                f = bs_line(x)
-                if f is None:
-                    continue
-                g.put(f"A{r}", f"    {x.label} {'감소(증가)' if x.side == 'asset' else '증가(감소)'}")
-                g.put(f"B{r}", Formula(f), "num")
-                g.put(f"C{r}", "수정후BS 증감" + (" - 현금 없는 손익" if x.tb_row in noncash_used else ""))
-            cat_lines[cat].append(r)
-            r += 1
-
-    write("op", "  2. 영업활동으로 인한 자산·부채의 변동")
-    for col in "B":
-        g.put(f"{col}{sections['op']}", Formula("+".join(f"B{x}" for x in op_lines + cat_lines["op"]) or "0"),
-              "boldnum")
-    g.put(f"A{r}", "Ⅱ. 투자활동으로 인한 현금흐름", "bold")
-    sections["inv"] = r
-    r += 1
-    write("inv", None)
-    g.put(f"B{sections['inv']}", Formula("+".join(f"B{x}" for x in cat_lines["inv"]) or "0"), "boldnum")
-    g.put(f"A{r}", "Ⅲ. 재무활동으로 인한 현금흐름", "bold")
-    sections["fin"] = r
-    r += 1
-    write("fin", None)
-    g.put(f"B{sections['fin']}", Formula("+".join(f"B{x}" for x in cat_lines["fin"]) or "0"), "boldnum")
-    if by_cat["other"]:
-        g.put(f"A{r}", "Ⅳ. 현금 없는 자본 변동 등 (분석 필요)", "bold")
-        sections["other"] = r
-        r += 1
-        write("other", None)
-        g.put(f"B{sections['other']}", Formula("+".join(f"B{x}" for x in cat_lines["other"]) or "0"), "boldnum")
-    r += 1
-    g.put(f"A{r}", "현금의 증가(감소)", "bold")
-    g.put(f"B{r}", Formula("+".join(f"B{sections[k]}" for k in sections)), "boldnum")
-    inc = r
-    r += 1
-    cash = [x for x in bs_rows if _is_cash(x) and x.tb_row in bs["acc"]]
-    g.put(f"A{r}", "기초의 현금", "bold")
-    g.put(f"B{r}", Formula("+".join(f"{b}!C{bs['acc'][x.tb_row]}" for x in cash) or "0"), "boldnum")
-    g.put(f"C{r}", "현금으로 본 계정: " + (", ".join(x.name for x in cash) or "없음"))
-    beg = r
-    r += 1
-    g.put(f"A{r}", "기말의 현금", "bold")
-    g.put(f"B{r}", Formula(f"B{beg}+B{inc}"), "boldnum")
-    end = r
-    r += 2
-    g.put(f"A{r}", "검증: 기말 현금(수정후BS) - 기말의 현금 (0이어야 함)", "bold")
-    end_cash = "+".join(f"{b}!B{bs['acc'][x.tb_row]}" for x in cash) or "0"
-    g.put(f"B{r}", Formula(f"ROUND(({end_cash})-B{end},0)"), "check")
-    g.put(f"C{r}", "0이 아니면 전기 금액이 빠졌거나(BS 탭 전기), 재무상태표 대차가 맞지 않는 것")
-    return grid_xml(g.cells, [46, 18, 56], freeze="B5"), {"sections": sections, "check": r}
-
-
 # ---------------------------------------------------------------- 수정후 금액 (파이썬 계산)
 
 @dataclass
@@ -721,28 +600,23 @@ class Figure:
     adjustment: float    # 수정분개 (같은 부호)
 
 
-def figures(workpaper: str | Path, aje_path: str | Path | None = None) -> tuple[list[Figure], float, list[str]]:
-    """수정분개까지 반영한 계정별 금액을 계산한다 (주석 자료 양식·감사보고서용).
-    aje_path가 없으면 조서 안 AJE 탭을 쓴다. 반환: (계정별 금액, 당기순이익, 참고)"""
-    tpl, rows = read_rows(workpaper)
-    notes: list[str] = []
+def _prior_amounts(workpaper: str | Path) -> tuple[dict[int, object], dict[str, object], bool]:
+    """BS 탭 F열(전기)을 행 번호로, IS 탭 F열(전기)을 과목명으로. 그리고 조서에 AJE 탭이 있는지."""
     wb = open_workbook(workpaper, read_only=True, data_only=True)
     try:
         has_aje = "AJE" in wb.sheetnames
         bs_prior, is_prior = {}, {}
-        ws = wb["BS"]
-        for i, r in enumerate(ws.iter_rows(min_row=1, max_col=6, values_only=True), start=1):
+        for i, r in enumerate(wb["BS"].iter_rows(min_row=1, max_col=6, values_only=True), start=1):
             bs_prior[i] = r[5] if len(r) > 5 else None
         for r in wb["IS"].iter_rows(min_row=1, max_col=6, values_only=True):
             if len(r) > 5 and isinstance(r[2], str) and isinstance(r[5], (int, float)):
                 is_prior.setdefault(squash(r[2]), r[5])
     finally:
         wb.close()
-    lines = read_aje(aje_path) if aje_path else (read_aje(workpaper) if has_aje else [])
-    if not aje_path and not has_aje:
-        notes.append("수정분개가 없어 시산표 금액 그대로 썼습니다")
-    rows, problems, more = add_new_accounts(tpl, rows, lines)
-    notes += problems
+    return bs_prior, is_prior, has_aje
+
+
+def _figures(rows: list[TbRow], lines: list[AjeLine], bs_prior: dict, is_prior: dict) -> list[Figure]:
     net: dict[str, float] = {}
     for ln in lines:
         net[ln.account] = net.get(ln.account, 0.0) + ln.debit - ln.credit
@@ -757,8 +631,26 @@ def figures(workpaper: str | Path, aje_path: str | Path | None = None) -> tuple[
         else:
             prior = to_number(bs_prior.get(x.bs_row)) if x.bs_row and bs_prior.get(x.bs_row) is not None else None
         out.append(Figure(x, cur, prior, adj))
-    ni = sum(f.current * (1 if f.row.key in REVENUE_KEYS else -1) for f in out if f.row.side == "is")
-    return out, ni, notes
+    return out
+
+
+def _net_income(figs: list[Figure]) -> float:
+    return sum(f.current * (1 if f.row.key in REVENUE_KEYS else -1) for f in figs if f.row.side == "is")
+
+
+def figures(workpaper: str | Path, aje_path: str | Path | None = None) -> tuple[list[Figure], float, list[str]]:
+    """수정분개까지 반영한 계정별 금액을 계산한다 (주석 자료 양식·감사보고서용).
+    aje_path가 없으면 조서 안 AJE 탭을 쓴다. 반환: (계정별 금액, 당기순이익, 참고)"""
+    tpl, rows = read_rows(workpaper)
+    notes: list[str] = []
+    bs_prior, is_prior, has_aje = _prior_amounts(workpaper)
+    lines = read_aje(aje_path) if aje_path else (read_aje(workpaper) if has_aje else [])
+    if not aje_path and not has_aje:
+        notes.append("수정분개가 없어 시산표 금액 그대로 썼습니다")
+    rows, problems, more = add_new_accounts(tpl, rows, lines)
+    notes += problems
+    out = _figures(rows, lines, bs_prior, is_prior)
+    return out, _net_income(out), notes
 
 
 # ---------------------------------------------------------------- 반영
@@ -774,18 +666,24 @@ def apply(workpaper: str | Path, aje_path: str | Path, output: str | Path) -> Re
     rows, problems, notes = add_new_accounts(tpl, rows, lines)
     res.problems = problems + check_aje(lines, rows)
     res.notes += notes
+    from . import fs_sheets
+    bs_prior, is_prior, _ = _prior_amounts(workpaper)
+    figs = _figures(rows, lines, bs_prior, is_prior)
     pkg = XlsxPackage(workpaper)
-    for name in NEW_TABS:
+    for name in NEW_TABS + OLD_TABS:
         if pkg.has_sheet(name):
             pkg.remove_sheet(name)
-            res.notes.append(f"전에 만든 '{name}' 탭을 새로 만들었습니다")
+            if name in NEW_TABS:
+                res.notes.append(f"전에 만든 '{name}' 탭을 새로 만들었습니다")
     st = pkg.add_basic_styles()
     aje_xml, aje_total = _aje_sheet(st, lines)
     ws_xml, wpos, w = _worksheet(st, rows, aje_total)
     bs_xml, bs = _bs_sheet(st, rows, wpos, w)
     is_xml, is_ = _is_sheet(st, rows, wpos, w)
-    cf_xml, _ = _cf_sheet(st, rows, bs, is_)
-    for name, xml in zip(NEW_TABS, (aje_xml, ws_xml, bs_xml, is_xml, cf_xml)):
+    tabs = [("AJE", aje_xml), ("정산표", ws_xml), ("수정후BS", bs_xml), ("수정후IS", is_xml)]
+    tabs += fs_sheets.build(st, rows, figs, bs, is_, pkg.has_sheet("일반사항"))
+    assert [n for n, _ in tabs] == list(NEW_TABS)
+    for name, xml in tabs:
         pkg.add_sheet(name, xml)
     # 리드시트 Audited(F/S) = G/L + 수정분개
     n = 0
@@ -797,7 +695,7 @@ def apply(workpaper: str | Path, aje_path: str | Path, output: str | Path) -> Re
             n += 1
     res.notes.append(f"리드시트 {len(tpl.lead_rows)}개 탭 {n}줄의 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿨습니다")
     if not any(x.bs_row for x in rows if x.side != "is"):
-        res.notes.append("BS 탭 전기 금액이 없어 현금흐름정산표 검증이 맞지 않을 수 있습니다")
+        res.notes.append("BS 탭 전기 금액이 없어 정산표-CF 검증이 맞지 않을 수 있습니다")
     pkg.recalc_on_open()
     pkg.normal_view()
     res.output = pkg.save(output)

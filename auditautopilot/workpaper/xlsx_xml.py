@@ -263,6 +263,11 @@ class XlsxPackage:
             "input": f'<xf numFmtId="3" fontId="{plain}" fillId="{fill + 1}" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>',
             "check": f'<xf numFmtId="3" fontId="{red}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
             "pct": f'<xf numFmtId="10" fontId="{plain}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
+            "ctitle": (f'<xf numFmtId="0" fontId="{title}" fillId="0" borderId="0" xfId="0" applyFont="1" '
+                       f'applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'),
+            "date": f'<xf numFmtId="14" fontId="{plain}" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>',
+            "right": (f'<xf numFmtId="0" fontId="{plain}" fillId="0" borderId="0" xfId="0" applyFont="1" '
+                      f'applyAlignment="1"><alignment horizontal="right"/></xf>'),
         }
         x0 = append("cellXfs", list(specs.values()))
         self._data["xl/styles.xml"] = xml.encode("utf-8")

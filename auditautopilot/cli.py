@@ -349,7 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("-o", "--output", required=True)
     ls.set_defaults(func=cmd_leadsheet)
 
-    ad = sub.add_parser("adjust", help="수정분개를 조서에 반영 (AJE·정산표·수정후BS·IS·현금흐름정산표 탭, 리드시트 Audited 칸)")
+    ad = sub.add_parser("adjust", help="수정분개를 조서에 반영 (AJE·정산표·수정후BS·IS·정산표-CF·보고서 BS·IS·자본변동표·현금흐름표 탭, 리드시트 Audited 칸)")
     ad.add_argument("workpaper", help="리드시트까지 채운 조서 (leadsheet 결과)")
     ad.add_argument("aje", nargs="?", help="채운 수정분개 양식")
     ad.add_argument("--template", action="store_true", help="이 조서의 계정과목으로 빈 수정분개 양식만 만든다")

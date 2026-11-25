@@ -1,4 +1,4 @@
-"""수정분개 → 정산표·수정후BS·IS·현금흐름정산표. 가짜 회사·숫자만 쓴다."""
+"""수정분개 → 정산표·수정후BS·IS·정산표-CF·보고서 탭. 가짜 회사·숫자만 쓴다."""
 
 import io
 import shutil
@@ -77,7 +77,7 @@ def test_apply_adds_tabs_and_formulas(filled, tmp_path):
     assert res.entries == 1 and res.debit == res.credit == 10000 and not res.problems
     assert any("대손상각비" in n and "판매관리비" in n for n in res.notes)
     wb = openpyxl.load_workbook(res.output)
-    assert wb.sheetnames[-5:] == list(adjust.NEW_TABS)
+    assert wb.sheetnames[-len(adjust.NEW_TABS):] == list(adjust.NEW_TABS)
     assert wb["AJE"]["E5"].number_format == "#,##0" and wb["AJE"]["E5"].value == 10000   # 새 서식 번호가 맞는지
     assert wb["AJE"]["A4"].font.b and wb["정산표"]["A1"].font.sz == 13
     ws = wb["정산표"]
@@ -89,9 +89,17 @@ def test_apply_adds_tabs_and_formulas(filled, tmp_path):
     lead = wb["C1000"]
     i_formulas = [lead.cell(x, 9).value for x in range(12, 16)]
     assert any(f and "'정산표'!N" in f for f in i_formulas) and all(f and f.startswith("=H") for f in i_formulas)
-    cf = wb["현금흐름정산표"]
-    labels = [cf.cell(x, 1).value for x in range(1, cf.max_row + 1)]
-    assert "  가산: 대손상각비" in labels and any(x and "기말의 현금" in x for x in labels)
+    cf = wb["정산표-CF"]
+    assert [cf.cell(7, c).value for c in range(7, 16)] == ["Dr(유출)", "Cr(유입)", "자산부채변동", "Dr(유출)",
+                                                          "Cr(유입)", "Dr(유출)", "Cr(유입)", "Dr", "Cr"]
+    cfr = {(cf.cell(x, 3).value or "").strip(): x for x in range(8, cf.max_row + 1)}
+    x = cfr["대손충당금(외상매출금)"]
+    assert "'수정후IS'!B" in cf[f"H{x}"].value                       # 대손상각비 → 대손충당금 Cr(유입)
+    assert cf[f"P{x}"].value.startswith("=(G") and cf[f"I{x}"].value == f"=-(F{x}+H{x}-G{x})"
+    rep = wb["보고서현금흐름표"]
+    labels = [rep.cell(x, 2).value for x in range(1, rep.max_row + 1)]
+    assert "대손상각비" in labels and "기말의 현금" in labels
+    assert wb["보고서 BS"]["A1"].value == "재 무 상 태 표" and wb["보고서 BS"]["C3"].value == "당기"
     # 다시 반영하면 탭을 새로 만든다 (두 벌 생기지 않음)
     again = adjust.apply(res.output, aje, tmp_path / "반영2.xlsx")
     assert openpyxl.load_workbook(again.output).sheetnames.count("정산표") == 1
@@ -130,8 +138,21 @@ def test_formulas_balance_after_recalc(filled, tmp_path):
         return ws.cell(r, col).value
     assert find("수정후IS", "Ⅹ. 당기순이익(손실)") == 190000
     assert find("수정후BS", "자산총계") == 1440000 and find("수정후BS", "부채와자본총계") == 1440000
-    assert find("현금흐름정산표", "현금의 증가(감소)") == 100000
-    assert find("현금흐름정산표", "검증: 기말 현금(수정후BS) - 기말의 현금 (0이어야 함)") == 0
+    assert find("보고서현금흐름표", "현금의 증가(감소)(Ⅰ+Ⅱ+Ⅲ)", col=4, label_col=2) == 100000
+    rep = wb["보고서현금흐름표"]
+    assert all((rep.cell(r, 7).value or 0) == 0 for r in range(5, rep.max_row + 1))        # 검증 칸
+    assert find("보고서 BS", "자산총계", col=4, label_col=2) == 1440000
+    assert find("보고서 BS", "부채와자본총계", col=4, label_col=2) == 1440000
+    assert find("보고서IS", "당기순이익(손실)", col=4, label_col=2) == 190000
+    cf = wb["정산표-CF"]
+    for r in range(8, cf.max_row + 1):
+        name = (cf.cell(r, 3).value or "").strip()
+        if cf.cell(r, 1).value in (10, 20) and name not in ("현금", "보통예금"):
+            assert round(cf.cell(r, 16).value) == 0, name                 # 비고: 모두 나눔
+        if name.startswith("검증") or (cf.cell(r, 3).value or "").startswith(("비현금흐름", "덜 나눈", "현금흐름 합계")):
+            assert (cf.cell(r, 6).value or 0) == 0, name
+    eq = wb["자본변동표"]
+    assert all((eq.cell(14, c).value or 0) == 0 for c in range(2, eq.max_column + 1))
     ws = wb["정산표"]
     checks = [ws.cell(r, 4).value for r in range(1, ws.max_row + 1)
               if (ws.cell(r, 3).value or "").endswith(("차변-대변", "(TB에 없는 과목)"))]
