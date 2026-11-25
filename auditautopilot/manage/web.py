@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, filing, mailbox, mailer, pbc, schedule
+from . import config, confirmations, filing, mailbox, mailer, nicebiz, pbc, schedule
 from .db import KINDS, STATUSES, Store
 
 MAX_UPLOAD = 300 * 1024 * 1024
@@ -189,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/items/add", "item_add"),
         ("POST", r"/e/(\d+)/upload", "upload"),
         ("POST", r"/e/(\d+)/sweep", "sweep"),
+        ("POST", r"/e/(\d+)/confirm", "confirm_reconcile"),
+        ("POST", r"/e/(\d+)/confirm/fetch", "confirm_fetch"),
+        ("POST", r"/e/(\d+)/confirm/project", "confirm_project"),
+        ("GET", r"/e/(\d+)/confirm\.xlsx", "confirm_xlsx"),
         ("POST", r"/e/(\d+)/files/(\d+)", "refile"),
         ("GET", r"/e/(\d+)/pbc\.xlsx", "pbc_xlsx"),
         ("GET", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)", "mail_preview"),
@@ -203,6 +207,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/settings/mail-test", "mail_test"),
         ("POST", r"/settings/mail-delete", "mail_account_delete"),
         ("POST", r"/settings/mail-options", "mail_options_save"),
+        ("POST", r"/settings/nice", "nice_save"),
+        ("POST", r"/settings/nice-test", "nice_test"),
     ]
 
     def _dispatch(self, method: str):
@@ -437,6 +443,7 @@ class Handler(BaseHTTPRequestHandler):
 {links_html}
 <table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
 {''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>
+{self._confirm_card(e, cfg)}
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
 <button class="ghost" style="color:var(--warn);border-color:var(--warn)">감사 건 삭제</button></form>"""
         self._send(page(f"{e['client_name']} {e['fiscal_year']} {e['kind']}", body, *self._flash()))
@@ -491,6 +498,107 @@ class Handler(BaseHTTPRequestHandler):
         item_id = int(f["item_id"]) if f.get("item_id") else None
         dest = filing.refile(self.store, self._eng(eid), self.app.cfg(), int(fid), item_id)
         self._redirect(f"/e/{eid}", f"옮김: {dest}")
+
+    def _confirm_card(self, e, cfg) -> str:
+        eid = e["id"]
+        rec = confirmations.latest(self.store, eid)
+        projects = confirmations.cached_projects(self.store)
+        cur = confirmations.project_of(self.store, eid)
+        if confirmations.ready(cfg):
+            opts = "<option value=''>자동으로 찾기 (회사 이름·연도)</option>" + "".join(
+                f"<option value='{esc(p['id'])}' {'selected' if p['id'] == cur else ''}>"
+                f"{esc(p['label'])}{'' if p.get('in_progress', True) else ' (종료)'}</option>" for p in projects)
+            top = (f"<form method='post' action='/e/{eid}/confirm/project' class='row'>"
+                   f"<label>전자조회 프로젝트<select name='project_id' style='max-width:520px'>{opts}</select></label>"
+                   f"<button class='ghost'>연결</button></form>"
+                   f"<form method='post' action='/e/{eid}/confirm/fetch' style='margin-top:8px'>"
+                   f"<button>전자조회에서 지금 가져오기</button></form>")
+        else:
+            top = ("<p>설정 &gt; <a href='/settings#nice'>전자조회 계정</a>에 아이디·비밀번호를 넣으면 "
+                   "사이트에서 회신현황을 바로 가져옵니다.</p>")
+        result = "<p class='mute'>아직 가져온 결과가 없습니다.</p>"
+        if rec:
+            c = rec.get("counts", {})
+            rows = "".join(
+                f"<tr><td>{esc(s['계정'])}</td><td>{s['조회 건수']}</td><td>{s['일치']}</td><td>{s['불일치']}</td>"
+                f"<td>{s['미회신']}</td><td style='text-align:right'>{s['발송금액(원화)']:,.0f}</td></tr>"
+                for s in rec.get("summary", []))
+            result = (f"<p>{esc(rec.get('fetched_at', ''))} {esc(rec.get('source', ''))}"
+                      f"{' · ' + esc(rec['project']) if rec.get('project') else ''}<br>"
+                      f"일치 {c.get('일치', 0)} · <b>불일치 {c.get('불일치', 0)}</b> · <b>미회신 {c.get('미회신', 0)}</b> "
+                      f"<a class='btn ghost' href='/e/{eid}/confirm.xlsx'>대사표 내려받기</a></p>"
+                      f"<table><tr><th>계정</th><th>건수</th><th>일치</th><th>불일치</th><th>미회신</th><th>발송금액(원화)</th></tr>"
+                      f"{rows}</table>")
+        return f"""<div class="card" id="confirm"><h2 style="margin-top:0">채권채무 조회 (전자조회)</h2>
+{top}
+<div style="margin-top:10px">{result}</div>
+<form method="post" action="/e/{eid}/confirm" enctype="multipart/form-data" class="row" style="margin-top:10px">
+<input type="file" name="files" multiple accept=".xlsx"><button class="ghost">장부와 함께 대사표 만들기</button></form>
+<p class="mute">더존 재무상태표·거래처원장을 고르면 위에서 가져온 회신현황과 합쳐 발송금액을 장부 잔액과 맞춰 보고 계정별 조회 비율을 낸 대사표를 내려받습니다.
+사이트에서 직접 받은 회신현황 엑셀을 함께 골라도 됩니다.</p></div>"""
+
+    def confirm_fetch(self, eid):
+        e, cfg = self._eng(eid), self.app.cfg()
+        try:
+            rec = confirmations.fetch(self.store, e, cfg, self.app.today())
+        except nicebiz.LoginError as exc:
+            raise ValueError(f"전자조회: {exc}") from exc
+        except OSError as exc:
+            raise ValueError(f"전자조회 사이트에 연결하지 못했습니다: {exc}") from exc
+        c = rec["counts"]
+        self._redirect(f"/e/{eid}#confirm", f"전자조회에서 가져왔습니다: 일치 {c['일치']}, 불일치 {c['불일치']}, 미회신 {c['미회신']}")
+
+    def confirm_project(self, eid):
+        f, _ = self._form()
+        e = self._eng(eid)
+        confirmations.set_project(self.store, e["id"], f.get("project_id") or None)
+        self._redirect(f"/e/{eid}#confirm", "전자조회 프로젝트를 연결했습니다.")
+
+    def confirm_xlsx(self, eid):
+        from .. import confirm
+        from ..reports import write_excel
+        import tempfile
+
+        e = self._eng(eid)
+        paths = confirmations.stored_paths(self.store, e["id"])
+        if not paths:
+            raise ValueError("먼저 전자조회에서 가져오거나 회신현황 엑셀을 올려 주세요.")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.xlsx"
+            write_excel(out, confirm.build(paths).sheets())
+            data = out.read_bytes()
+        self._download(data, f"{e['client_name']}_{e['fiscal_year']}_{e['kind']}_채권채무조회.xlsx",
+                       mailer.XLSX[0] + "/" + mailer.XLSX[1])
+
+    def confirm_reconcile(self, eid):
+        import tempfile
+
+        from .. import confirm
+        from ..reports import write_excel
+
+        e = self._eng(eid)
+        _, files = self._form()
+        if not files:
+            raise ValueError("회신현황 엑셀 파일을 고르세요.")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, (name, data) in enumerate(files):
+                if not name.lower().endswith(".xlsx"):
+                    raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+                p = Path(tmp) / f"{i:02d}_{Path(name).name}"
+                p.write_bytes(data)
+                paths.append(p)
+            uploaded_status = [(n, d) for (n, d), p in zip(files, paths) if confirm.is_status_file(_xlsx_rows(p))]
+            if uploaded_status:
+                confirmations.attach(self.store, e, self.app.cfg(), uploaded_status, self.app.today())
+            else:
+                paths += confirmations.stored_paths(self.store, e["id"])
+            res = confirm.build(paths)
+            out = Path(tmp) / "out.xlsx"
+            write_excel(out, res.sheets())
+            data = out.read_bytes()
+        self._download(data, f"{e['client_name']}_{e['fiscal_year']}_{e['kind']}_채권채무조회.xlsx",
+                       mailer.XLSX[0] + "/" + mailer.XLSX[1])
 
     def pbc_xlsx(self, eid):
         e = self._eng(eid)
@@ -617,6 +725,27 @@ class Handler(BaseHTTPRequestHandler):
         credstore.delete(user)
         self._redirect("/settings#mail", f"{user} 계정을 지웠습니다.")
 
+    def nice_save(self):
+        f, _ = self._form()
+        u = f.get("nice_user", "").strip()
+        self.store.set_setting("nice_user", u)
+        self.store.set_setting("nice_auto", f.get("nice_auto") == "1")
+        note = "전자조회 계정을 저장했습니다."
+        if u and f.get("password"):
+            note += " " + confirmations.set_password(u, f["password"], remember=f.get("remember") == "1")
+        self._redirect("/settings#nice", note)
+
+    def nice_test(self):
+        cfg = self.app.cfg()
+        try:
+            projects = confirmations.refresh_projects(self.store, cfg)
+        except nicebiz.LoginError as exc:
+            raise ValueError(f"전자조회: {exc}") from exc
+        except OSError as exc:
+            raise ValueError(f"전자조회 사이트에 연결하지 못했습니다: {exc}") from exc
+        live = sum(1 for p in projects if p.get("in_progress", True))
+        self._redirect("/settings#nice", f"전자조회 로그인 성공: 진행 중 프로젝트 {live}개, 종료 {len(projects) - live}개를 불러왔습니다.")
+
     def mail_options_save(self):
         f, _ = self._form()
         new = {"send_from": f.get("send_from", ""), "auto_send": f.get("auto_send") == "1",
@@ -682,8 +811,25 @@ class Handler(BaseHTTPRequestHandler):
 {{현장감사 시작일}} {{현장감사 종료일}} {{제출기한}} {{미제출 건수}} {{D-n}} {{감사코드}} {{요청 자료 표}} {{미제출 자료 표}}</p>
 {inp('request_subject', '최초 요청 제목', style='width:100%')}{area('request_body', '최초 요청 본문', 12)}
 {inp('reminder_subject', '독촉 제목', style='width:100%')}{area('reminder_body', '독촉 본문', 9)}{area('dday_body', '당일 본문', 7)}
-</div><p><button>설정 저장</button></p></form>{self._mail_settings(cfg)}"""
+</div><p><button>설정 저장</button></p></form>{self._mail_settings(cfg)}{self._nice_settings(cfg)}"""
         self._send(page("설정", body, *self._flash()))
+
+    def _nice_settings(self, cfg) -> str:
+        u = confirmations.user(cfg)
+        pw = ("들어 있음" if confirmations.ready(cfg) else "<span class='warn'>없음</span>") if u else ""
+        n = len(confirmations.cached_projects(self.store))
+        test = (f"<form method='post' action='/settings/nice-test' style='margin-top:8px'><button class='ghost'>로그인 시험 (프로젝트 목록 불러오기)</button>"
+                f"{f' <span class=mute>불러온 프로젝트 {n}개</span>' if n else ''}</form>") if u else ""
+        return f"""<div class="card" id="nice"><h2 style="margin-top:0">전자조회 계정 (한공회 채권채무 전자조회)</h2>
+<form method="post" action="/settings/nice" class="row">
+<label>아이디<input name="nice_user" value="{esc(u)}" autocomplete="username"></label>
+<label>비밀번호 {pw}<input name="password" type="password" autocomplete="current-password" placeholder="바꿀 때만 입력"></label>
+<label style="flex-direction:row;gap:4px"><input type="checkbox" name="remember" value="1">윈도우 자격 증명 관리자에 저장</label>
+<label style="flex-direction:row;gap:4px"><input type="checkbox" name="nice_auto" value="1" {'checked' if cfg.get('nice_auto') else ''}>하루 한 번 자동으로 가져오기</label>
+<button>저장</button></form>{test}
+<p class="mute">회계사 본인 아이디로 로그인합니다. 이용약관상 ID는 다른 사람과 같이 쓰면 안 되므로, 팀원은 각자 자기 PC에서 자기 아이디를 넣어 주세요.
+비밀번호를 여러 번 틀려 자동입력방지 문자가 나오면 사이트에서 한 번 직접 로그인한 뒤 다시 시도하세요.
+<a href="https://kicpa.nicebizline.com/cc/CC0100M002GE.nice" target="_blank" rel="noopener">이용약관</a></p></div>"""
 
     def _mail_settings(self, cfg) -> str:
         provs = [(k, k) for k in mailbox.PRESETS] + [("직접 입력", "직접 입력")]
@@ -760,6 +906,11 @@ for(const k of ['imap_host','imap_port','smtp_host','smtp_port'])$(k).value=a[k]
         self._redirect("/settings", "설정을 저장했습니다.")
 
 
+def _xlsx_rows(path):
+    from ..importers.douzone import _rows_of
+    return _rows_of(path)
+
+
 def imaplib_error():
     return mailbox.imaplib.IMAP4.error
 
@@ -804,6 +955,12 @@ def start_background(srv) -> threading.Thread:
             with app.lock:
                 lines = mailbox.run_cycle(app.store, cfg, datetime.now(),
                                           lambda e, d: mailer.message_for(app.store, cfg, e, d), state)
+            if cfg.get("nice_auto") and confirmations.ready(cfg):
+                now = datetime.now()
+                if now.hour >= int(cfg.get("send_hour", 9)) and state.get("nice_on") != now.date():
+                    state["nice_on"] = now.date()
+                    with app.lock:
+                        lines = list(lines) + confirmations.fetch_all(app.store, cfg, now.date())
             if lines:
                 app.note(lines)
                 for line in lines:

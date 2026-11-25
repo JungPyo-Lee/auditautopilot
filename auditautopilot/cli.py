@@ -13,6 +13,7 @@
   python -m auditautopilot materiality --benchmark 매출액 --amount 18669084279 --overall-pct 1
   python -m auditautopilot analytics 재무제표등.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
   python -m auditautopilot sample 재무제표등.xlsx --account 108 --method mus --n 25 -o 표본.xlsx
+  python -m auditautopilot confirm 회신현황.xlsx 재무상태표.xlsx 거래처원장*.xlsx -o 채권채무조회.xlsx
   python -m auditautopilot serve            (관리 화면: http://127.0.0.1:8765)
 """
 
@@ -22,7 +23,7 @@ import argparse
 import re
 import sys
 
-from . import analytics, materiality, sampling
+from . import analytics, confirm, materiality, sampling
 from .importers import books as books_mod
 from .importers import douzone, semusarang
 from .reports import write_excel
@@ -196,6 +197,18 @@ def cmd_sample(args) -> int:
     return 0
 
 
+def cmd_confirm(args) -> int:
+    res = confirm.build(args.src)
+    write_excel(args.output, res.sheets())
+    for n in res.notes:
+        print(f"참고: {n}")
+    for s in res.summary:
+        ratio = f", 조회 비율 {s['조회 비율(원화)']}%" if s.get("조회 비율(원화)") is not None else ""
+        print(f"{s['계정']}: {s['조회 건수']}건 (일치 {s['일치']}, 불일치 {s['불일치']}, 미회신 {s['미회신']}){ratio}")
+    print(f"저장: {args.output}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .manage.web import serve
 
@@ -255,6 +268,11 @@ def build_parser() -> argparse.ArgumentParser:
     sa.add_argument("--seed", type=int)
     sa.add_argument("-o", "--output", required=True)
     sa.set_defaults(func=cmd_sample)
+
+    co = sub.add_parser("confirm", help="채권채무 전자조회 회신현황 정리·대사")
+    co.add_argument("src", nargs="+", help="회신현황 엑셀. 더존 재무상태표·거래처원장을 함께 주면 장부와 맞춰 본다")
+    co.add_argument("-o", "--output", required=True)
+    co.set_defaults(func=cmd_confirm)
 
     sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
     sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")

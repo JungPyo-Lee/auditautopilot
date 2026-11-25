@@ -144,15 +144,20 @@ def match_item(items: list[dict], *texts: str) -> dict | None:
 
 def save_file(store, engagement: dict, cfg: dict, original_name: str, *, data: bytes | None = None,
                        src: Path | None = None, subject: str = "", received_on: date | None = None,
-                       item_id: int | None = None, source: str = "", move: bool = False) -> dict:
-    """한 파일을 저장하고 PBC 상태를 갱신한다. 반환: {'path', 'item', 'matched'}"""
+                       item_id: int | None = None, source: str = "", move: bool = False,
+                       category: str | None = None) -> dict:
+    """한 파일을 저장하고 PBC 상태를 갱신한다. 반환: {'path', 'item', 'matched'}
+    category를 주면 PBC 항목과 맞추지 않고 그 분류 폴더에 저장한다 (예: 채권채무조회)."""
     items = store.items(engagement["id"])
     received_on = received_on or date.today()
     if item_id:
         item = next((i for i in items if i["id"] == item_id), None)
+    elif category:
+        item = None
     else:
         item = match_item(items, original_name, subject)
-    category = (cfg.get("categories") or ["PBC"])[0] if item else cfg.get("unmatched_category", "미분류")
+    if not category:
+        category = (cfg.get("categories") or ["PBC"])[0] if item else cfg.get("unmatched_category", "미분류")
     ctx = context(engagement, category, cfg, original_name, item, received_on)
     dest = unique_path(build_path(cfg.get("folder_rule") or "", ctx))
     dest.parent.mkdir(parents=True, exist_ok=True)
