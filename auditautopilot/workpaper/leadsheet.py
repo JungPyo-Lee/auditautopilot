@@ -85,6 +85,9 @@ class Template:
     styles: dict[str, str | None] = field(default_factory=dict)
     table_head: dict[str, str] = field(default_factory=dict)  # ○1100 탭 -> 'No.' 머리글 셀 (서식 본보기)
     missing_from_total: list[Group] = field(default_factory=list)  # TB 합계 수식에 빠진 묶음
+    d_formula: dict[int, str] = field(default_factory=dict)        # TB 탭 D열 수식 (행 -> 수식)
+    total_row: int | None = None
+    slot_info: dict[int, tuple] = field(default_factory=dict)      # TB 칸 행 -> (과목, J열 수식, 숫자 있는 열)
 
     def group(self, key: str) -> Group | None:
         major, prefix = TARGETS[key]
@@ -104,7 +107,7 @@ def read_template(path: str | Path) -> Template:
         if not {"TB", "BS", "IS"} <= set(wb.sheetnames):
             raise ValueError("조서에 TB·BS·IS 탭이 없습니다. 조서 양식 파일을 넣어 주세요.")
         tb = wb["TB"]
-        groups, major, d_formula, total_row = [], "", {}, None
+        groups, major, d_formula, total_row, slot_info = [], "", {}, None, {}
         for r in range(1, tb.max_row + 1):
             f = tb.cell(r, 6).value
             text = squash(f) if isinstance(f, str) else ""
@@ -115,6 +118,9 @@ def read_template(path: str | Path) -> Template:
             d = tb.cell(r, 4).value
             if isinstance(d, str) and d.startswith("="):
                 d_formula[r] = d
+            nums = [col for col, i in (("D", 4), ("E", 5), ("G", 7), ("H", 8))
+                    if isinstance(tb.cell(r, i).value, (int, float))]
+            slot_info[r] = (text, tb.cell(r, 10).value, nums)
             m = _SUM_RE.match(d) if isinstance(d, str) else None
             if m and m.group(1) == "D":
                 b = tb.cell(r, 2).value
@@ -164,7 +170,8 @@ def read_template(path: str | Path) -> Template:
                         seen.add(int(ref))
                         todo.append(int(ref))
             missing = [g for g in groups if g.row not in seen]
-        return Template(groups, bs_row, is_groups, lead_rows, tabs, table_head=heads, missing_from_total=missing)
+        return Template(groups, bs_row, is_groups, lead_rows, tabs, table_head=heads, missing_from_total=missing,
+                        d_formula=d_formula, total_row=total_row, slot_info=slot_info)
     finally:
         wb.close()
 
@@ -450,6 +457,18 @@ def fill_tb(pkg: XlsxPackage, tpl: Template, accounts: list[Account], res: Resul
                 bs.set(f"D{tpl.bs_row[r]}", _num(cur))
                 bs.set(f"F{tpl.bs_row[r]}", _num(_signed(a, g.side, abs(a.prior)) if a.prior else None))
         res.placed.append(a)
+    # 마감 전 시산표는 당기 손익이 이익잉여금에 안 들어가 있으므로 BS 탭 미처분이익잉여금에 더해 대차를 맞춘다
+    ni = sum(a.cb - a.db for a in accounts if a.key in TARGETS and TARGETS[a.key][0] not in BS_SIDES)
+    if abs(ni) >= 1:
+        ret = [a for a in res.placed if a.key == "retained" and a.tb_row in tpl.bs_row]
+        target = next((a for a in ret if "미처분" in a.name or "결손" in a.name), ret[-1] if ret else None)
+        if target is None:
+            res.notes.append(f"시산표 손익 {ni:,.0f}원을 넣을 이익잉여금 칸이 없어 BS 탭 대차가 맞지 않습니다")
+        else:
+            cur = target.cb - target.db + ni
+            bs.set(f"D{tpl.bs_row[target.tb_row]}", _num(cur))
+            res.notes.append(f"시산표가 결산 마감 전이라 당기 손익 {ni:,.0f}원을 BS 탭 '{target.name}' 당기 금액에 더했습니다 "
+                             f"(TB 탭·리드시트는 시산표 잔액 그대로)")
     for lead, pairs in tpl.lead_rows.items():      # 리드시트 B열(계정코드)
         by_row = {a.tb_row: a for a in res.placed if a.tb_row}
         ed = pkg.sheet(lead)
@@ -616,6 +635,79 @@ def _styles(pkg: XlsxPackage, tpl: Template) -> dict[str, str | None]:
     return st
 
 
+# ---------------------------------------------------------------- 양식 합계 수식 고치기
+
+def fix_totals(pkg: XlsxPackage, tpl: Template) -> list[str]:
+    """TB 탭 합계 수식에서 빠진 묶음을 더한다 (D·E·G·H열).
+    재무상태표 묶음은 바로 위의 소계 줄(예: <투자자산>, [비유동부채])에, 손익 묶음은 맨 아래 합계 줄에 더한다."""
+    if not tpl.missing_from_total or not tpl.total_row:
+        return []
+    tb = pkg.sheet("TB")
+    added: dict[int, list[Group]] = {}
+    for g in tpl.missing_from_total:
+        parent = tpl.total_row
+        if g.side != "is":
+            parent = next((r for r in range(g.row - 1, 0, -1)
+                           if r in tpl.d_formula and not _SUM_RE.match(tpl.d_formula[r]) and "+" in tpl.d_formula[r]),
+                          tpl.total_row)
+        added.setdefault(parent, []).append(g)
+    out = []
+    for parent, gs in added.items():
+        for col in "DEGH":
+            f = re.sub(r"(?<![A-Z])D(\d+)", lambda m: f"{col}{m.group(1)}", tpl.d_formula[parent])
+            tb.set(f"{col}{parent}", Formula(f + "".join(f"+{col}{g.row}" for g in gs)))
+        tpl.d_formula[parent] = tpl.d_formula[parent] + "".join(f"+D{g.row}" for g in gs)
+        out.append(f"TB 탭 {parent}행 합계 수식에 " + "·".join(f"{g.label}({g.row}행)" for g in gs) + " 묶음을 더했습니다")
+    tpl.missing_from_total = []
+    return out
+
+
+def fix_contra_slots(pkg: XlsxPackage, tpl: Template) -> list[str]:
+    """과목이 차감계정(대손충당금 등)인데 증가·감소·검증 수식이 일반 자산용인 칸을 차감계정용으로 바꾼다."""
+    tb, rows = pkg.sheet("TB"), []
+    for g in tpl.groups:
+        if g.side != "asset":
+            continue
+        for r in g.slots:
+            label, j, _ = tpl.slot_info.get(r, ("", None, []))
+            if is_contra(label) and isinstance(j, str) and j.replace(" ", "") == f"=E{r}-I{r}":
+                tb.set(f"J{r}", Formula(f"-G{r}-I{r}"))
+                tb.set(f"K{r}", Formula(f"E{r}"))
+                tb.set(f"M{r}", Formula(f"-L{r}=H{r}"))
+                rows.append(r)
+    return [f"TB 탭 {', '.join(map(str, rows))}행: 대손충당금 칸의 증가·감소·검증 수식을 차감계정용으로 바꿨습니다"] if rows else []
+
+
+def clear_samples(pkg: XlsxPackage, tpl: Template) -> list[str]:
+    """양식에 남아 있는 예시 금액(TB 탭 D·E·G·H, BS 탭 D·F)을 지운다. 과목 이름은 안내용이라 둔다."""
+    tb, bs, n = pkg.sheet("TB"), pkg.sheet("BS"), 0
+    for g in tpl.groups:
+        for r in g.slots:
+            for col in tpl.slot_info.get(r, ("", None, []))[2]:
+                tb.set(f"{col}{r}", None)
+                n += 1
+            if r in tpl.bs_row:
+                for col in "DF":
+                    x = bs.cell_xml(f"{col}{tpl.bs_row[r]}")
+                    if x and "<v>" in x and "<f" not in x:
+                        bs.set(f"{col}{tpl.bs_row[r]}", None)
+                        n += 1
+    return [f"양식에 남아 있던 예시 금액 {n}칸을 지웠습니다"] if n else []
+
+
+def fix_template(workpaper: str | Path, output: str | Path) -> list[str]:
+    """빈 조서 양식을 고쳐 다른 이름으로 저장한다: 합계 수식, 차감계정 칸 수식, 예시 금액."""
+    workpaper, output = Path(workpaper), Path(output)
+    if workpaper.resolve() == output.resolve():
+        raise ValueError("원본 조서에 덮어쓰지 않습니다. 다른 이름으로 저장해 주세요.")
+    tpl = read_template(workpaper)
+    pkg = XlsxPackage(workpaper)
+    lines = fix_totals(pkg, tpl) + fix_contra_slots(pkg, tpl) + clear_samples(pkg, tpl)
+    pkg.recalc_on_open()
+    pkg.save(output)
+    return lines or ["고칠 합계 수식이 없습니다."]
+
+
 # ---------------------------------------------------------------- 전체
 
 def build(workpaper: str | Path, sources: list[str | Path], output: str | Path,
@@ -632,12 +724,9 @@ def build(workpaper: str | Path, sources: list[str | Path], output: str | Path,
     attach_prior(accounts, b.bs, res.notes)
     pkg = XlsxPackage(workpaper)
     tpl.styles = _styles(pkg, tpl)
+    res.notes += fix_totals(pkg, tpl)
+    res.notes += fix_contra_slots(pkg, tpl)
     fill_tb(pkg, tpl, accounts, res)
-    used = {tpl.group(a.key).row for a in res.placed}
-    gaps = [g for g in tpl.missing_from_total if g.row in used]
-    if gaps:
-        res.notes.append("조서 TB 탭의 합계 행 수식에 " + "·".join(g.label for g in gaps)
-                         + " 묶음이 빠져 있어 TB 검증(차변=대변)이 FALSE로 나옵니다. 양식의 합계 수식을 확인해 주세요.")
     if b.pl:
         lines = pl_lines(b.pl)
         tb_sales = sum(c for k, _, c, _ in tb_is_lines(accounts) if k == "sales")

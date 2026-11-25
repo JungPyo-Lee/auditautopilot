@@ -169,6 +169,8 @@ def test_build_fills_tabs(template, tb_file, dz, tmp_path):  # noqa: F811
     assert (tb["F22"].value, tb["H22"].value, bs["F22"].value) == ("외상매입금", 250000, 200000)
     assert tb["F26"].value == "미처분이익잉여금"
     assert (tb["F28"].value, tb["G28"].value) == ("제품매출", 5000000)
+    assert bs["D26"].value == 1000000 + 200000          # 마감 전 당기 손익을 미처분이익잉여금에 더함
+    assert any("당기 손익 200,000원" in n for n in res.notes)
     assert (is_["C6"].value, is_["D6"].value, is_["F6"].value) == ("제품매출", 5000000, 5500000)
     assert wb["C1000"]["B12"].value == "108"
 
@@ -248,3 +250,20 @@ def test_unshare_then_set():
     assert "<f>B2*2</f>" in ed.xml and "<f>B3*2</f>" in ed.xml and 't="shared"' not in ed.xml
     ed.set("C5", "새 글자")
     assert ed.xml.index('r="5"') > ed.xml.index('r="3"') and "새 글자" in ed.xml
+
+
+def test_fix_template(template, tmp_path, capsys):
+    wb = openpyxl.load_workbook(template)
+    wb["TB"]["D35"] = "=D9+D20+D24+D27"                 # 판매관리비 묶음이 빠진 합계
+    wb["TB"]["E35"] = "=E9+E20+E24+E27"
+    wb["TB"]["F14"] = "대손충당금"                       # 차감계정인데 일반 수식
+    wb.save(template)
+    out = tmp_path / "고친양식.xlsx"
+    assert main(["leadsheet", str(template), "--fix-template", "-o", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "35행 합계 수식에 판매관리비(30행)" in text and "14, 17행" in text and "예시 금액" in text
+    tb = openpyxl.load_workbook(out)["TB"]
+    assert tb["D35"].value == "=D9+D20+D24+D27+D30" and tb["E35"].value == "=E9+E20+E24+E27+E30"
+    assert tb["J14"].value == "=-G14-I14" and tb["M14"].value == "=-L14=H14"
+    assert tb["D16"].value is None and tb["F16"].value == "공사미수금"     # 예시 금액만 지우고 과목은 둠
+    assert main(["leadsheet", str(template), "-o", str(tmp_path / "x.xlsx")]) == 1

@@ -219,6 +219,12 @@ def cmd_leadsheet(args) -> int:
             raise ValueError(f"--ledger 는 '파일=계정명' 꼴로 주세요: {item}")
         f, acc = item.split("=", 1)
         names[Path(f).name] = acc.strip()
+    if args.fix_template:
+        print("\n".join(leadsheet.fix_template(args.workpaper, args.output)))
+        print(f"저장: {args.output}")
+        return 0
+    if not args.src:
+        raise ValueError("합계잔액시산표 등 회사 자료를 함께 주세요 (양식만 고칠 때는 --fix-template).")
     res = leadsheet.build(args.workpaper, args.src, args.output, names)
     print("\n".join(res.lines()))
     print(f"저장: {args.output}")
@@ -292,7 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ls = sub.add_parser("leadsheet", help="합계잔액시산표로 조서 TB·BS·IS 탭(리드시트)과 ○1100 거래처 명세 채우기")
     ls.add_argument("workpaper", help="조서 양식 엑셀 (TB·BS·IS 탭이 있는 파일)")
-    ls.add_argument("src", nargs="+", help="더존 합계잔액시산표 (필수), 재무상태표·손익계산서(과목별), 거래처원장(잔액)")
+    ls.add_argument("src", nargs="*", help="더존 합계잔액시산표 (필수), 재무상태표·손익계산서(과목별), 거래처원장(잔액)")
+    ls.add_argument("--fix-template", action="store_true",
+                    help="회사 자료 없이 빈 양식만 고친다 (빠진 합계 수식, 대손충당금 칸 수식, 남은 예시 금액)")
     ls.add_argument("--ledger", action="append", metavar="파일=계정명",
                     help="거래처원장이 어느 계정인지 직접 정할 때. 예: --ledger 거래처원장(1).xlsx=외상매출금")
     ls.add_argument("-o", "--output", required=True)
