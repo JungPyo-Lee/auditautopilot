@@ -69,6 +69,26 @@ python -m auditautopilot analytics 재무상태표과목별.xlsx 손익계산서
 python -m auditautopilot sample 재무상태표과목별.xlsx "거래처원장 (1).xlsx" --account 외상매출금 --threshold 500000000 -o 표본.xlsx
 ```
 
+## 채권채무 조회 (전자조회 회신현황)
+
+전자조회 사이트에서 내려받은 회신현황 엑셀(기업명·구분·발송금액·회신금액·일치여부·회신일시)을 읽어 대사표를 만든다.
+관리 화면의 감사 건 페이지 [채권채무 조회]에 올리거나 명령으로 실행한다.
+
+```
+python -m auditautopilot confirm 회신현황.xlsx -o 채권채무조회.xlsx
+python -m auditautopilot confirm 회신현황.xlsx 재무상태표과목별.xlsx "거래처원장 (1).xlsx" "거래처원장 (2).xlsx" -o 채권채무조회.xlsx
+```
+
+- 시트: 요약(계정별 일치·불일치·미회신 건수와 금액, 조회 비율) / 불일치_차이조정 / 미회신_대체절차 / 명세 / 참고
+- 구분 '외상매출금(커머스)'는 외상매출금으로, 영문 'accounts receivable'은 외상매출금으로 묶는다. 같은 거래처를 여러 차수로 보냈으면 마지막 차수를 쓴다.
+- 재무상태표·거래처원장을 함께 주면 발송금액이 장부 잔액과 같은지 거래처별로 다시 확인하고(이름의 (주)·주식회사 표기 차이는 무시),
+  계정별 조회 비율(발송금액 ÷ 재무상태표 잔액)을 낸다.
+- 외화 건은 환율을 곱하지 않으므로 원화 합계·조회 비율에서 빠진다. 회신 금액 단위가 발송과 크게 다르면 '확인할 점'에 표시한다.
+- 불일치는 차이조정, 미회신은 대체적 절차 대상이다 (감사기준서 505 '외부조회' 문단 12 미회신·문단 14 예외사항.
+  국제감사기준 ISA 505와 같은 구성: [ICAEW 해설](https://www.icaew.com/technical/audit-and-assurance/faculty-resources/implementing-isas/external-confirmations-in-an-isa-audit),
+  [ISA 505 원문 (IAASA)](https://iaasa.ie/wp-content/uploads/2022/09/ISA505I.pdf)).
+- 금융기관 조회는 아직 다루지 않는다.
+
 ## 메일 계정
 
 IMAP(받기)·SMTP(보내기)를 쓰는 메일이면 된다. 계정은 여러 개 넣을 수 있다. 받은 메일은 모든 계정에서 확인하고(두 계정에 함께 온 같은 메일은 한 번만 처리), 보낼 때는 기본 계정 또는 회사 화면에서 회사마다 정한 계정을 쓴다. 설정 > 메일 계정에서 Gmail, 다음(한메일), 네이버를 고르면 서버 주소가 채워지고,

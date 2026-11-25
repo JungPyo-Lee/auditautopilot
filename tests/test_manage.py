@@ -237,6 +237,25 @@ def test_web_flow(server, store):
     assert st == 303 and "%ED%95%AD%EB%AA%A9%20%EC%97%B0%EA%B2%B0%201" in h["Location"]  # '항목 연결 1'
     assert len(store.files(eid)) == 2
 
+    # 전자조회 회신현황 → 대사표 내려받기 (가짜 거래처)
+    import io
+
+    import openpyxl
+    wb = openpyxl.Workbook()
+    for r in [["기업명", "구분", "발송금액", "회신금액", "일치여부", "회신일시"],
+              ["가나상사", "외상매출금", 1000, 900, "N", "2027-01-05"], ["다라상사", "미지급금", 500, None, "", None]]:
+        wb.active.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    data, hdr = _multipart([], [("files", "회신현황.xlsx", buf.getvalue())])
+    st, h, x = _open(base + f"/e/{eid}/confirm", data, hdr)
+    assert st == 200 and "attachment" in h["Content-Disposition"]
+    out = openpyxl.load_workbook(io.BytesIO(x))
+    assert [r[0] for r in out["불일치_차이조정"].iter_rows(values_only=True)][1] == "가나상사"
+    assert [r[0] for r in out["미회신_대체절차"].iter_rows(values_only=True)][1] == "다라상사"
+    data, hdr = _multipart([], [("files", "메모.txt", b"x")])
+    assert _open(base + f"/e/{eid}/confirm", data, hdr)[0] == 303     # 엑셀이 아니면 설명과 함께 되돌아감
+
     st, h, x = _open(base + f"/e/{eid}/pbc.xlsx")
     assert st == 200 and x[:2] == b"PK"
 

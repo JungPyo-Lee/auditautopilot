@@ -189,6 +189,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/items/add", "item_add"),
         ("POST", r"/e/(\d+)/upload", "upload"),
         ("POST", r"/e/(\d+)/sweep", "sweep"),
+        ("POST", r"/e/(\d+)/confirm", "confirm_reconcile"),
         ("POST", r"/e/(\d+)/files/(\d+)", "refile"),
         ("GET", r"/e/(\d+)/pbc\.xlsx", "pbc_xlsx"),
         ("GET", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)", "mail_preview"),
@@ -437,6 +438,11 @@ class Handler(BaseHTTPRequestHandler):
 {links_html}
 <table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
 {''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>
+<div class="card"><h2 style="margin-top:0">채권채무 조회 (전자조회)</h2>
+<form method="post" action="/e/{e['id']}/confirm" enctype="multipart/form-data" class="row">
+<input type="file" name="files" multiple accept=".xlsx"><button>대사표 만들기</button></form>
+<p class="mute">전자조회에서 내려받은 회신현황 엑셀을 올리면 일치·불일치·미회신으로 나눈 대사표(엑셀)를 내려받습니다.
+더존 재무상태표와 거래처원장을 함께 고르면 발송금액을 장부 잔액과 다시 맞춰 보고 계정별 조회 비율도 냅니다.</p></div>
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
 <button class="ghost" style="color:var(--warn);border-color:var(--warn)">감사 건 삭제</button></form>"""
         self._send(page(f"{e['client_name']} {e['fiscal_year']} {e['kind']}", body, *self._flash()))
@@ -491,6 +497,31 @@ class Handler(BaseHTTPRequestHandler):
         item_id = int(f["item_id"]) if f.get("item_id") else None
         dest = filing.refile(self.store, self._eng(eid), self.app.cfg(), int(fid), item_id)
         self._redirect(f"/e/{eid}", f"옮김: {dest}")
+
+    def confirm_reconcile(self, eid):
+        import tempfile
+
+        from .. import confirm
+        from ..reports import write_excel
+
+        e = self._eng(eid)
+        _, files = self._form()
+        if not files:
+            raise ValueError("회신현황 엑셀 파일을 고르세요.")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, (name, data) in enumerate(files):
+                if not name.lower().endswith(".xlsx"):
+                    raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+                p = Path(tmp) / f"{i:02d}_{Path(name).name}"
+                p.write_bytes(data)
+                paths.append(p)
+            res = confirm.build(paths)
+            out = Path(tmp) / "out.xlsx"
+            write_excel(out, res.sheets())
+            data = out.read_bytes()
+        self._download(data, f"{e['client_name']}_{e['fiscal_year']}_{e['kind']}_채권채무조회.xlsx",
+                       mailer.XLSX[0] + "/" + mailer.XLSX[1])
 
     def pbc_xlsx(self, eid):
         e = self._eng(eid)
