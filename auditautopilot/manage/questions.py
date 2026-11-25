@@ -137,7 +137,9 @@ def from_confirmations(store, engagement: dict, today: date | None = None) -> in
 
     paths = confirmations.stored_paths(store, engagement["id"])
     if not paths:
-        raise ValueError("먼저 채권채무 조회 회신현황을 가져와 주세요.")
+        raise ValueError("이 감사 건에 채권채무 조회 회신현황이 아직 없습니다. 위 '채권채무 조회' 카드에서 "
+                         "[전자조회에서 지금 가져오기]를 누르거나 회신현황 엑셀을 올린 뒤 다시 눌러 주세요. "
+                         "(감사 건·회신현황은 PC마다 따로 저장됩니다.) 질문은 아래 [질문 추가]로 직접 넣을 수도 있습니다.")
     res = confirm.build(paths)
     have = {q["source"] for q in all_(store, engagement["id"])}
     n = 0
