@@ -1,4 +1,4 @@
-import pandas as pd
+from datetime import date
 
 from auditautopilot.importers import douzone, semusarang
 from auditautopilot.importers.common import mask_reg_no, normalize_code, parse_account_label, to_number
@@ -23,29 +23,30 @@ def test_mask_reg_no_hides_resident_numbers_only():
 def test_semusarang_bundle(semusarang_file):
     b = semusarang.load(semusarang_file)
     assert b.periods["current"].startswith("제 2(당)기")
-    accounts = b.tb[b.tb["level"] == "account"]
-    assert list(accounts["code"]) == ["103", "108", "251", "404"]
-    assert accounts.set_index("code").loc["251", "balance"] == -300000
-    assert (b.tb["level"] == "total").sum() == 1
+    accounts = [r for r in b.tb if r["level"] == "account"]
+    assert [r["code"] for r in accounts] == ["103", "108", "251", "404"]
+    assert {r["code"]: r["balance"] for r in accounts}["251"] == -300000
+    assert sum(r["level"] == "total" for r in b.tb) == 1
 
-    bs = b.bs.set_index("name")
-    assert bs.loc["보통예금", "current"] == 1000000      # 재무상태표 계정은 집계금액 열
-    pl = b.pl.set_index("name")
-    assert pl.loc["제품매출", "prior"] == 9000000        # 손익계산서 계정은 금액 열
+    bs = {r["name"]: r for r in b.bs}
+    assert bs["보통예금"]["current"] == 1000000      # 재무상태표 계정은 집계금액 열
+    pl = {r["name"]: r for r in b.pl}
+    assert pl["제품매출"]["prior"] == 9000000        # 손익계산서 계정은 금액 열
 
     assert len(b.journal) == 4
-    assert b.journal["debit"].sum() == b.journal["credit"].sum()
-    assert b.journal.loc[0, "account_code"] == "108"
-    assert b.journal.loc[0, "partner_code"] == "101"
-    assert pd.api.types.is_datetime64_any_dtype(b.journal["date"])
+    assert sum(r["debit"] for r in b.journal) == sum(r["credit"] for r in b.journal)
+    assert b.journal[0]["account_code"] == "108"
+    assert b.journal[0]["partner_code"] == "101"
+    assert b.journal[0]["date"] == date(2026, 1, 5)
 
-    p = b.partners.set_index("partner")
-    assert p.loc["개인고객", "reg_no"] == "900101-1******"
-    assert set(b.partners["account_code"]) == {"108"}
+    p = {r["partner"]: r for r in b.partners}
+    assert p["개인고객"]["reg_no"] == "900101-1******"
+    assert {r["account_code"] for r in b.partners} == {"108"}
 
 
 def test_douzone_journal(douzone_journal_file):
     j = douzone.load_journal(douzone_journal_file)
-    assert list(j["account_code"]) == ["253", "103"]
-    assert list(j["partner_code"]) == ["101", "101"]
-    assert j["debit"].sum() == j["credit"].sum() == 1000
+    assert [r["account_code"] for r in j] == ["253", "103"]
+    assert [r["partner_code"] for r in j] == ["101", "101"]
+    assert sum(r["debit"] for r in j) == sum(r["credit"] for r in j) == 1000
+    assert j[0]["date"] == date(2026, 3, 2)

@@ -17,11 +17,17 @@
 
 ## 설치
 
-Python 3.10 이상이 필요하다.
+Python 3.10 이상([python.org](https://www.python.org/downloads/) 설치본)이 필요하다.
+필요한 패키지는 openpyxl 하나뿐이다.
 
 ```
-pip install -e .[dev]
+python -m pip install -e ".[dev]"
 ```
+
+윈도우 스마트 앱 컨트롤·회사 앱 제어 정책은 서명 없는 DLL(pandas, numpy, lxml 등)과
+가상환경의 `pip.exe`를 막는다. 그래서 이 도구는 순수 파이썬 패키지만 쓰고,
+설치는 `pip` 대신 `python -m pip`으로 한다. 새 기능에도 컴파일된 패키지를 추가하지 않는다
+(`tests/test_cli.py::test_no_compiled_packages_are_imported`가 확인한다).
 
 ## 사용 예
 
@@ -72,3 +78,5 @@ python -m auditautopilot sample 재무제표등.xlsx --account 108 --threshold 1
 ```
 python -m pytest
 ```
+
+실제 조서·회사 자료는 저장소 안 `data` 폴더에 넣어 쓴다 (`.gitignore`로 막혀 있어 GitHub에 올라가지 않는다).

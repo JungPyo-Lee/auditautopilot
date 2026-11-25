@@ -8,11 +8,10 @@ version = "0.1.0"
 description = "회계감사 중간·기말 업무 자동화 도구"
 readme = "README.md"
 requires-python = ">=3.10"
+# 윈도우 앱 제어(스마트 앱 컨트롤 등)에 막히지 않도록 순수 파이썬 패키지만 쓴다.
+# pandas, numpy, lxml 처럼 컴파일된 DLL이 들어 있는 패키지는 추가하지 않는다.
 dependencies = [
-  "pandas>=2.0",
   "openpyxl>=3.1",
-  "lxml>=4.9",
-  "xlrd>=2.0",
 ]
 
 [project.optional-dependencies]

@@ -16,8 +16,6 @@ import argparse
 import re
 import sys
 
-import pandas as pd
-
 from . import analytics, materiality, sampling
 from .importers import douzone, semusarang
 from .reports import write_excel
@@ -34,6 +32,15 @@ JOURNAL_HEADERS = {
     "account_name": "계정과목", "debit": "차변", "credit": "대변",
     "partner_code": "거래처코드", "partner": "거래처", "memo": "적요",
 }
+def _rename(rows: list[dict], mapping: dict[str, str], keep: list[str] | None = None) -> list[dict]:
+    keys = keep
+    out = []
+    for r in rows:
+        ks = keys or list(r)
+        out.append({mapping.get(k, k): r.get(k) for k in ks})
+    return out
+
+
 PARTNER_HEADERS = {
     "account_code": "계정코드", "partner_code": "거래처코드", "partner": "거래처",
     "reg_no": "등록번호", "opening": "전기이월", "debit": "차변", "credit": "대변", "balance": "잔액",
@@ -66,19 +73,20 @@ def cmd_import(args) -> int:
     if args.kind == "semusarang":
         b = semusarang.load(args.src)
         sheets = {
-            "시산표": b.tb.rename(columns=TB_HEADERS),
-            "재무상태표": b.bs.rename(columns=FS_HEADERS),
-            "손익계산서": b.pl.rename(columns=FS_HEADERS),
-            "분개장": b.journal.rename(columns=JOURNAL_HEADERS),
-            "거래처별잔액": b.partners.rename(columns=PARTNER_HEADERS),
+            "시산표": _rename(b.tb, TB_HEADERS),
+            "재무상태표": _rename(b.bs, FS_HEADERS),
+            "손익계산서": _rename(b.pl, FS_HEADERS),
+            "분개장": _rename(b.journal, JOURNAL_HEADERS),
+            "거래처별잔액": _rename(b.partners, PARTNER_HEADERS),
         }
         print(f"시산표 {len(b.tb)}행, 분개장 {len(b.journal):,}행, 거래처 잔액 {len(b.partners):,}행")
         if b.periods:
             print(f"기간: {b.periods.get('current', '')}")
     else:
         j = douzone.load_journal(args.src)
-        sheets = {"분개장": j.rename(columns=JOURNAL_HEADERS)}
-        print(f"분개장 {len(j):,}행, 차대 차이 {j['debit'].sum() - j['credit'].sum():,.0f}")
+        sheets = {"분개장": _rename(j, JOURNAL_HEADERS)}
+        diff = sum(r["debit"] for r in j) - sum(r["credit"] for r in j)
+        print(f"분개장 {len(j):,}행, 차대 차이 {diff:,.0f}")
     write_excel(args.output, sheets)
     print(f"저장: {args.output}")
     return 0
@@ -106,8 +114,8 @@ def cmd_materiality(args) -> int:
     )
     if amount < 0:
         print(f"주의: 기준 금액이 음수({amount:,.0f})입니다. 절대값으로 계산했으니 기준 선택을 다시 검토하세요.")
-    table = result.as_table()
-    for _, r in table.iterrows():
+    table = result.as_rows()
+    for r in table:
         v = r["값"]
         print(f"{r['항목']}: {v:,.0f}" if isinstance(v, float) else f"{r['항목']}: {v}")
     if args.output:
@@ -122,22 +130,22 @@ def cmd_analytics(args) -> int:
     rule = analytics.VarianceRule(args.threshold_amount, args.threshold_pct, annualize_factor=12 / months)
     bs = analytics.compare_periods(b.bs, rule)
     pl = analytics.compare_periods(b.pl, rule, annualize=months < 12)
-    questions = analytics.draft_questions(pd.concat([bs, pl], ignore_index=True))
+    questions = analytics.draft_questions(bs + pl)
     cols = {"code": "계정코드", "name": "계정과목", "prior": "전기", "current": "당기",
             "current_compared": "비교금액(연환산)", "diff": "증감", "pct": "증감률(%)",
             "flag": "검토대상", "reason": "사유"}
     keep = list(cols)
     sheets = {
-        "재무상태표 증감": bs[keep].rename(columns=cols),
-        "손익계산서 증감": pl[keep].rename(columns=cols),
+        "재무상태표 증감": _rename(bs, cols, keep),
+        "손익계산서 증감": _rename(pl, cols, keep),
         "질문서 초안": questions,
     }
-    if not b.journal.empty:
-        sheets["월별 추이"] = analytics.monthly_trend(b.journal).rename(
-            columns={"account_code": "계정코드", "account_name": "계정과목"})
+    if b.journal:
+        sheets["월별 추이"] = _rename(analytics.monthly_trend(b.journal),
+                                   {"account_code": "계정코드", "account_name": "계정과목"})
     write_excel(args.output, sheets)
     print(f"기준: {args.threshold_amount:,.0f}원 이상 그리고 {args.threshold_pct}% 이상, 손익 연환산 {months}개월→12개월")
-    print(f"검토대상 재무상태표 {int(bs['flag'].sum())}개, 손익계산서 {int(pl['flag'].sum())}개, 질문 {len(questions)}건")
+    print(f"검토대상 재무상태표 {sum(r['flag'] for r in bs)}개, 손익계산서 {sum(r['flag'] for r in pl)}개, 질문 {len(questions)}건")
     print(f"저장: {args.output}")
     return 0
 
@@ -146,14 +154,13 @@ def cmd_sample(args) -> int:
     b = semusarang.load(args.src)
     code = str(int(args.account)).zfill(3) if args.account.isdigit() else args.account
     if args.source == "partners":
-        pop = b.partners[b.partners["account_code"] == code].rename(columns=PARTNER_HEADERS)
+        pop = _rename([r for r in b.partners if r["account_code"] == code], PARTNER_HEADERS)
         amount_col = "잔액"
     else:
-        j = b.journal[b.journal["account_code"] == code].copy()
-        j["금액"] = j["debit"] - j["credit"]
-        pop = j.rename(columns=JOURNAL_HEADERS)
+        pop = [{**r, "금액": r["debit"] - r["credit"]} for r in b.journal if r["account_code"] == code]
+        pop = _rename(pop, JOURNAL_HEADERS)
         amount_col = "금액"
-    if pop.empty:
+    if not pop:
         print(f"계정 {args.account}의 모집단이 비어 있습니다.", file=sys.stderr)
         return 2
     result = sampling.sample(pop, amount_col, args.method, n=args.n,

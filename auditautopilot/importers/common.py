@@ -1,14 +1,14 @@
 """회계 프로그램 내보내기 파일을 읽을 때 공통으로 쓰는 도구.
 
-모든 불러오기 함수는 아래 표준 열 이름으로 된 DataFrame을 돌려준다.
+모든 불러오기 함수는 아래 표준 열 이름을 키로 하는 dict 목록(list[dict])을 돌려준다.
+윈도우 앱 제어 정책에 막히지 않도록 pandas·numpy 같은 컴파일된 패키지는 쓰지 않는다.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from typing import Iterable, Sequence
-
-import pandas as pd
 
 # 표준 열 이름
 TB_COLUMNS = [
@@ -111,5 +111,18 @@ def cell(row: Sequence[object], index: int | None) -> object:
     return row[index]
 
 
-def empty_frame(columns: list[str]) -> pd.DataFrame:
-    return pd.DataFrame(columns=columns)
+def parse_date(value: object) -> date | None:
+    """'2026-01-05', '2026.01.05', '20260105', datetime 값을 date로 바꾼다. 못 읽으면 None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
