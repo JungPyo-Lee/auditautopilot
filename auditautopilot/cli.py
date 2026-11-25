@@ -245,6 +245,26 @@ def cmd_adjust(args) -> int:
     return 0
 
 
+def cmd_notes(args) -> int:
+    from .workpaper import notes
+
+    res = notes.request_workbook(args.workpaper, args.output, args.company or "")
+    print(f"정산표 금액 채움: {', '.join(res.filled)}")
+    print(f"회사 작성: {', '.join(res.company)}")
+    print("\n".join(f"참고: {n}" for n in res.notes))
+    print(f"저장: {res.output}")
+    return 0
+
+
+def cmd_report(args) -> int:
+    from .workpaper import report
+
+    out, notes = report.draft(args.workpaper, args.output, args.opinion)
+    print("\n".join(f"참고: {n}" for n in notes))
+    print(f"저장: {out}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .manage.web import serve
 
@@ -326,6 +346,18 @@ def build_parser() -> argparse.ArgumentParser:
     ad.add_argument("--template", action="store_true", help="이 조서의 계정과목으로 빈 수정분개 양식만 만든다")
     ad.add_argument("-o", "--output", required=True)
     ad.set_defaults(func=cmd_adjust)
+
+    nt = sub.add_parser("notes", help="주석 자료요청 양식 (정산표 금액 채움 / 회사 작성 시트)")
+    nt.add_argument("workpaper", help="수정분개까지 반영한 조서 (adjust 결과)")
+    nt.add_argument("--company", help="회사명 (비우면 조서 일반사항 탭)")
+    nt.add_argument("-o", "--output", required=True)
+    nt.set_defaults(func=cmd_notes)
+
+    rp = sub.add_parser("report", help="감사보고서 초안 (워드)")
+    rp.add_argument("workpaper", help="수정분개까지 반영한 조서 (adjust 결과)")
+    rp.add_argument("--opinion", default="적정", choices=["적정", "한정", "부적정", "의견거절"])
+    rp.add_argument("-o", "--output", required=True)
+    rp.set_defaults(func=cmd_report)
 
     sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
     sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")
