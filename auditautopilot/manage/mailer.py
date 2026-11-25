@@ -58,4 +58,5 @@ def message_for(store, cfg: dict, engagement: dict, draft) -> EmailMessage:
     items = [by_code[c] for c in draft.item_codes if c in by_code]
     name = (f"{engagement['client_name']}_{engagement['kind']}_자료요청목록.xlsx"
             if draft.kind == "request" else None)
-    return build_message(draft, cfg.get("sender_email") or cfg.get("mail_user") or "", items, name)
+    from .mailbox import sender_for
+    return build_message(draft, sender_for(cfg, engagement) or cfg.get("sender_email") or "", items, name)

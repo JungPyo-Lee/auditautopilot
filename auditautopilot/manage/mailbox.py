@@ -55,15 +55,34 @@ def get_password(user: str) -> str | None:
     return pw
 
 
-def account(cfg: dict) -> dict:
-    user = (cfg.get("mail_user") or "").strip()
-    if not user:
-        raise ValueError("설정 > 메일 계정에서 메일 주소를 넣어 주세요.")
+def accounts(cfg: dict) -> list[dict]:
+    return list(cfg.get("mail_accounts") or [])
+
+
+def sender_for(cfg: dict, engagement: dict | None = None) -> str:
+    """보낼 때 쓸 계정: 회사에 정한 계정 → 기본 보내는 계정 → 첫 계정"""
+    users = [a["user"] for a in accounts(cfg)]
+    for u in ((engagement or {}).get("send_from"), cfg.get("send_from")):
+        if u and u in users:
+            return u
+    return users[0] if users else ""
+
+
+def ready(cfg: dict) -> list[str]:
+    """비밀번호까지 들어 있어 바로 쓸 수 있는 계정들"""
+    return [a["user"] for a in accounts(cfg) if get_password(a["user"])]
+
+
+def account(cfg: dict, user: str | None = None) -> dict:
+    user = user or sender_for(cfg)
+    acc = next((a for a in accounts(cfg) if a["user"] == user), None)
+    if acc is None:
+        raise ValueError("설정 > 메일 계정에서 메일 계정을 먼저 추가해 주세요.")
     pw = get_password(user)
     if not pw:
-        raise ValueError("메일 비밀번호(앱 비밀번호)를 설정 화면에서 넣어 주세요.")
-    return {"user": user, "password": pw, "imap_host": cfg["imap_host"], "imap_port": int(cfg["imap_port"]),
-            "smtp_host": cfg["smtp_host"], "smtp_port": int(cfg["smtp_port"])}
+        raise ValueError(f"{user} 의 비밀번호(앱 비밀번호)를 설정 화면에서 넣어 주세요.")
+    return {"user": user, "password": pw, "imap_host": acc["imap_host"], "imap_port": int(acc["imap_port"]),
+            "smtp_host": acc["smtp_host"], "smtp_port": int(acc["smtp_port"])}
 
 
 # ── 보내기 ────────────────────────────────────────────
@@ -78,11 +97,11 @@ def _smtp(acc: dict):
     return s
 
 
-def send(cfg: dict, msg: EmailMessage) -> None:
-    acc = account(cfg)
+def send(cfg: dict, msg: EmailMessage, user: str | None = None) -> None:
+    acc = account(cfg, user)
     del msg["X-Unsent"]
-    if not msg["From"]:
-        msg["From"] = cfg.get("sender_email") or acc["user"]
+    del msg["From"]
+    msg["From"] = acc["user"]   # 로그인한 계정과 보내는 주소를 맞춘다 (다르면 거절하는 메일이 많다)
     s = _smtp(acc)
     try:
         s.send_message(msg)
@@ -93,14 +112,14 @@ def send(cfg: dict, msg: EmailMessage) -> None:
             pass
 
 
-def test_connection(cfg: dict) -> str:
-    acc = account(cfg)
+def test_connection(cfg: dict, user: str | None = None) -> str:
+    acc = account(cfg, user)
     s = _smtp(acc)
     s.quit()
     m = imaplib.IMAP4_SSL(acc["imap_host"], acc["imap_port"], ssl_context=ssl.create_default_context())
     m.login(acc["user"], acc["password"])
     m.logout()
-    return "보내기(SMTP)와 받기(IMAP) 모두 연결됐습니다."
+    return f"{acc['user']}: 보내기(SMTP)와 받기(IMAP) 모두 연결됐습니다."
 
 
 # ── 받기 ──────────────────────────────────────────────
@@ -110,6 +129,7 @@ class FetchResult:
     saved: list[dict] = field(default_factory=list)
     links: int = 0
     skipped: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 def _find_engagement(store, subject: str, sender: str, others: list[str], today: date) -> dict | None:
@@ -188,15 +208,30 @@ def process_message(store, cfg: dict, raw: bytes, today: date) -> dict:
 
 
 def fetch(store, cfg: dict, today: date | None = None, days: int = 14) -> FetchResult:
-    """받은편지함에서 최근 메일을 읽어 감사 건 첨부를 저장한다. 읽음 표시는 바꾸지 않는다."""
+    """비밀번호가 들어 있는 모든 계정의 받은편지함을 확인한다. 한 계정이 실패해도 나머지는 계속한다."""
     today = today or date.today()
-    acc = account(cfg)
     res = FetchResult()
+    users = ready(cfg)
+    if not users:
+        raise ValueError("비밀번호까지 넣은 메일 계정이 없습니다. 설정 > 메일 계정을 확인해 주세요.")
+    for user in users:
+        try:
+            _fetch_one(store, cfg, account(cfg, user), today, days, res)
+        except (OSError, imaplib.IMAP4.error) as exc:
+            res.errors.append(f"{user}: {exc}")
+    return res
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fetch_one(store, cfg: dict, acc: dict, today: date, days: int, res: FetchResult) -> None:
     m = imaplib.IMAP4_SSL(acc["imap_host"], acc["imap_port"], ssl_context=ssl.create_default_context())
     try:
         m.login(acc["user"], acc["password"])
         m.select("INBOX", readonly=True)
-        since = (today - timedelta(days=days)).strftime("%d-%b-%Y")
+        d0 = today - timedelta(days=days)
+        since = f"{d0.day:02d}-{_MONTHS[d0.month - 1]}-{d0.year}"   # 지역 설정과 무관하게 영문 월
         typ, data = m.uid("SEARCH", None, "SINCE", since)
         uids = (data[0] or b"").split() if typ == "OK" else []
         for uid in uids:
@@ -205,11 +240,16 @@ def fetch(store, cfg: dict, today: date | None = None, days: int = 14) -> FetchR
                 continue
             typ, parts = m.uid("FETCH", uid, "(BODY.PEEK[])")
             raw = next((p[1] for p in parts if isinstance(p, tuple)), None)
-            res.checked += 1
             if raw is None:
                 continue
-            out = process_message(store, cfg, raw, today)
             store.mark_mail_seen(key)
+            mid = str(BytesParser(policy=policy.default).parsebytes(raw, headersonly=True).get("Message-ID") or "").strip()
+            if mid and store.mail_seen("msgid:" + mid):
+                continue   # 두 계정에 함께 온 같은 메일
+            if mid:
+                store.mark_mail_seen("msgid:" + mid)
+            res.checked += 1
+            out = process_message(store, cfg, raw, today)
             if out["engagement"] is None:
                 res.skipped += 1
             res.saved.extend(out["files"])
@@ -219,7 +259,6 @@ def fetch(store, cfg: dict, today: date | None = None, days: int = 14) -> FetchR
             m.logout()
         except Exception:
             pass
-    return res
 
 
 # ── 자동 실행 ─────────────────────────────────────────
@@ -230,7 +269,7 @@ def send_due(store, cfg: dict, today: date, build_message) -> list[str]:
         if not d.to:
             continue
         msg = build_message(e, d)
-        send(cfg, msg)
+        send(cfg, msg, sender_for(cfg, e))
         schedule.record_sent(store, d, today)
         sent.append(f"{e['client_name']} {d.label}")
     return sent
@@ -239,12 +278,13 @@ def send_due(store, cfg: dict, today: date, build_message) -> list[str]:
 def run_cycle(store, cfg: dict, now: datetime, build_message, state: dict) -> list[str]:
     """백그라운드에서 주기적으로 부른다. 메일 확인 + (자동 발송이 켜져 있으면) 정해진 시각 이후 발송."""
     log = []
-    if not cfg.get("mail_user") or not get_password(cfg["mail_user"]):
+    if not ready(cfg):
         return log
     try:
         r = fetch(store, cfg, now.date())
         if r.saved or r.links:
             log.append(f"메일 확인: 첨부 {len(r.saved)}개 저장, 대용량 링크 {r.links}개")
+        log.extend(f"메일 확인 실패 {e}" for e in r.errors)
     except Exception as exc:  # 네트워크 오류 등은 다음 주기에 다시
         log.append(f"메일 확인 실패: {exc}")
     if cfg.get("auto_send") and now.hour >= int(cfg.get("send_hour", 9)) and state.get("sent_on") != now.date():
