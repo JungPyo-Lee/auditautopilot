@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from email.message import EmailMessage
+from email.utils import make_msgid
 
 import pytest
 
@@ -31,13 +32,17 @@ class FakeSMTP:
 
 
 class FakeIMAP:
-    messages: dict = {}
+    messages: dict = {}          # 계정마다 다른 받은편지함: {user: {uid: raw}} 또는 모든 계정 공통 {uid: raw}
+    fail: set = set()
 
     def __init__(self, host, port, ssl_context=None):
-        pass
+        self.box = {}
 
     def login(self, user, pw):
-        pass
+        if user in FakeIMAP.fail:
+            raise mailbox.imaplib.IMAP4.error("AUTHENTICATIONFAILED")
+        m = FakeIMAP.messages
+        self.box = m.get(user, {}) if m and isinstance(next(iter(m)), str) else m
 
     def select(self, box, readonly=False):
         assert readonly
@@ -45,10 +50,11 @@ class FakeIMAP:
 
     def uid(self, cmd, *args):
         if cmd == "SEARCH":
-            return "OK", [b" ".join(FakeIMAP.messages)]
+            assert args[1] == "SINCE" and args[2][3:6].isascii()
+            return "OK", [b" ".join(self.box)]
         uid = args[0]
         assert "PEEK" in args[1]  # 읽음 표시를 바꾸지 않는다
-        return "OK", [(b"1 (BODY[] {10}", FakeIMAP.messages[uid]), b")"]
+        return "OK", [(b"1 (BODY[] {10}", self.box[uid]), b")"]
 
     def logout(self):
         pass
@@ -61,12 +67,17 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(mailbox.imaplib, "IMAP4_SSL", FakeIMAP)
     FakeSMTP.sent = []
     FakeIMAP.messages = {}
+    FakeIMAP.fail = set()
     mailbox._PASSWORD.clear()
     s = Store(tmp_path / "a.db")
     s.set_setting("root", str(tmp_path / "감사"))
     s.set_setting("firm_name", "가나회계법인")
-    s.set_setting("mail_user", "me@gmail.com")
+    s.set_setting("mail_accounts", [
+        {"user": "me@gmail.com", "provider": "Gmail", **mailbox.PRESETS["Gmail"]},
+        {"user": "me@hanmail.net", "provider": "다음(한메일)", **mailbox.PRESETS["다음(한메일)"]}])
+    s.set_setting("send_from", "me@gmail.com")
     mailbox.set_password("me@gmail.com", "app-pw")
+    mailbox.set_password("me@hanmail.net", "app-pw")
     cid = s.add_client("C001", "한국상사", "김담당", "kim@hankook.co.kr", cc="lee@hankook.co.kr")
     eid = s.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
     return s, s.engagement(eid)
@@ -77,6 +88,7 @@ def _mail(sender, subject, attachments=(), body="자료 보내드립니다."):
     m["From"] = sender
     m["To"] = "me@gmail.com"
     m["Subject"] = subject
+    m["Message-ID"] = make_msgid()
     m.set_content(body)
     for name, data in attachments:
         m.add_attachment(data, maintype="application", subtype="octet-stream", filename=name)
@@ -92,9 +104,48 @@ def test_send_uses_tls_and_drops_unsent_header(env):
     assert msg["X-Unsent"] is None and msg["To"] == "kim@hankook.co.kr" and msg["From"] == "me@gmail.com"
     assert any(p.get_filename() for p in msg.iter_attachments())
 
-    s.set_setting("smtp_port", 587)  # 네이버처럼 587이면 STARTTLS
-    mailbox.send(config.load(s), mailer.message_for(s, cfg, e, d))
-    assert len(FakeSMTP.sent) == 2
+    accs = cfg["mail_accounts"]
+    accs[1]["smtp_port"] = 587  # 네이버처럼 587이면 STARTTLS
+    s.set_setting("mail_accounts", accs)
+    mailbox.send(config.load(s), mailer.message_for(s, cfg, e, d), "me@hanmail.net")
+    assert len(FakeSMTP.sent) == 2 and FakeSMTP.sent[1]["From"] == "me@hanmail.net"
+
+
+def test_sender_per_client(env):
+    s, e = env
+    cfg = config.load(s)
+    assert mailbox.sender_for(cfg, e) == "me@gmail.com"
+    s.update_client(s.clients()[0]["id"], send_from="me@hanmail.net")
+    e = s.engagement(e["id"])
+    assert mailbox.sender_for(cfg, e) == "me@hanmail.net"
+    d = schedule.due_drafts(s, e, date(2027, 1, 4), cfg)[0]
+    assert mailer.message_for(s, cfg, e, d)["From"] == "me@hanmail.net"
+    assert mailbox.sender_for(cfg, {"send_from": "deleted@x.com"}) == "me@gmail.com"
+
+
+def test_old_single_account_settings_are_migrated(tmp_path):
+    s = Store(tmp_path / "b.db")
+    for k, v in {"mail_user": "old@gmail.com", "mail_provider": "Gmail", "imap_host": "imap.gmail.com",
+                 "imap_port": 993, "smtp_host": "smtp.gmail.com", "smtp_port": 465}.items():
+        s.set_setting(k, v)
+    cfg = config.load(s)
+    assert cfg["mail_accounts"][0]["user"] == "old@gmail.com" and cfg["send_from"] == "old@gmail.com"
+
+
+def test_fetch_checks_every_account_and_skips_duplicates(env):
+    s, e = env
+    same = _mail("kim@hankook.co.kr", "급여대장 [C001-2026-기말]", [("급여대장.xlsx", b"z")])
+    FakeIMAP.messages = {
+        "me@gmail.com": {b"1": same},
+        "me@hanmail.net": {b"1": same,
+                           b"2": _mail("kim@hankook.co.kr", "보험 [C001-2026-기말]", [("보험가입내역.pdf", b"p")])},
+    }
+    r = mailbox.fetch(s, config.load(s), date(2027, 1, 6))
+    assert r.checked == 2 and len(r.saved) == 2 and not r.errors
+    FakeIMAP.fail = {"me@gmail.com"}
+    FakeIMAP.messages["me@hanmail.net"][b"3"] = _mail("kim@hankook.co.kr", "x [C001-2026-기말]", [("a.pdf", b"a")])
+    r = mailbox.fetch(s, config.load(s), date(2027, 1, 6))
+    assert len(r.saved) == 1 and r.errors and r.errors[0].startswith("me@gmail.com")
 
 
 def test_missing_password(env):
@@ -187,16 +238,24 @@ def test_web_mail_settings_and_send(env, monkeypatch):
             return err.code
 
     try:
-        assert post("/settings/mail", {"mail_provider": "네이버", "mail_user": "me@naver.com",
-                                       "password": "app-pw", "check_minutes": "5", "send_hour": "9"}) == 303
+        assert post("/settings/mail", {"provider": "네이버", "user": "me@naver.com", "password": "app-pw"}) == 303
+        assert post("/settings/mail", {"provider": "Gmail", "user": "me@gmail.com", "password": "app-pw"}) == 303
+        assert post("/settings/mail", {"provider": "다음(한메일)", "user": "me@hanmail.net", "password": "app-pw"}) == 303
         cfg = config.load(s)
-        assert cfg["imap_host"] == "imap.naver.com" and cfg["smtp_port"] == 587 and not cfg["auto_send"]
+        naver = next(a for a in cfg["mail_accounts"] if a["user"] == "me@naver.com")
+        assert naver["imap_host"] == "imap.naver.com" and naver["smtp_port"] == 587
+        assert [a["user"] for a in cfg["mail_accounts"]] == ["me@gmail.com", "me@hanmail.net", "me@naver.com"]
         assert "app-pw" not in str([s.get_setting(k) for k in config.DEFAULTS])   # 비밀번호는 DB에 없다
+        assert post("/settings/mail-options", {"send_from": "me@naver.com", "check_minutes": "5", "send_hour": "9"}) == 303
+        assert config.load(s)["send_from"] == "me@naver.com" and not config.load(s)["auto_send"]
+        assert post("/settings/mail-delete", {"user": "me@hanmail.net"}) == 303
+        assert len(config.load(s)["mail_accounts"]) == 2
+        assert "메일 계정" in opener.open(base + "/settings").read().decode()
         page = opener.open(base + f"/e/{e['id']}/mail/request/2027-01-04").read().decode()
         assert "지금 보내기" in page
         assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {}) == 303
-        assert len(FakeSMTP.sent) == 1 and s.request_sent(e["id"])
-        assert post("/settings/mail-test", {}) == 303
+        assert len(FakeSMTP.sent) == 1 and s.request_sent(e["id"]) and FakeSMTP.sent[0]["From"] == "me@naver.com"
+        assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
         assert post("/mail/fetch", {}) == 303
     finally:
         srv.shutdown()

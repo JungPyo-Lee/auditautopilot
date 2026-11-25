@@ -71,7 +71,7 @@ python -m auditautopilot sample 재무상태표과목별.xlsx "거래처원장 (
 
 ## 메일 계정
 
-IMAP(받기)·SMTP(보내기)를 쓰는 메일이면 된다. 설정 > 메일 계정에서 Gmail, 다음(한메일), 네이버를 고르면 서버 주소가 채워지고,
+IMAP(받기)·SMTP(보내기)를 쓰는 메일이면 된다. 계정은 여러 개 넣을 수 있다. 받은 메일은 모든 계정에서 확인하고(두 계정에 함께 온 같은 메일은 한 번만 처리), 보낼 때는 기본 계정 또는 회사 화면에서 회사마다 정한 계정을 쓴다. 설정 > 메일 계정에서 Gmail, 다음(한메일), 네이버를 고르면 서버 주소가 채워지고,
 그 밖의 메일은 서버 주소를 직접 넣는다. 비밀번호는 보통 각 메일 보안 설정에서 만든 '앱 비밀번호'를 쓴다.
 - [Gmail을 다른 메일 프로그램에 추가하기 (Google 고객센터)](https://support.google.com/mail/answer/7126229?hl=ko)
 - 다음·네이버 서버 값: [Daum](https://www.getmailbird.com/setup/access-daum-net-via-imap-smtp), [Naver](https://www.getmailbird.com/setup/access-naver-com-via-imap-smtp)

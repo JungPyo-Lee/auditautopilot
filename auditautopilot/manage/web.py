@@ -47,6 +47,7 @@ color:#fff;border-radius:5px;cursor:pointer;display:inline-block}button.ghost,.b
 pre{white-space:pre-wrap;font-family:inherit;background:#fafbfc;border:1px solid var(--line);padding:10px;border-radius:6px;margin:6px 0}
 .bar{height:8px;background:#e9ecf1;border-radius:4px;overflow:hidden;min-width:120px}
 .bar i{display:block;height:100%;background:#1d8a4e}
+button,.btn{white-space:nowrap}.card{overflow-x:auto}td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
 """
 
 
@@ -199,6 +200,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/settings", "settings_save"),
         ("POST", r"/settings/mail", "mail_account_save"),
         ("POST", r"/settings/mail-test", "mail_test"),
+        ("POST", r"/settings/mail-delete", "mail_account_delete"),
+        ("POST", r"/settings/mail-options", "mail_options_save"),
     ]
 
     def _dispatch(self, method: str):
@@ -263,11 +266,12 @@ class Handler(BaseHTTPRequestHandler):
                     + "".join(erows) + "</table>") if erows else (
             '<p class="mute">등록된 감사가 없습니다. <a href="/clients">회사</a>를 먼저 등록하고 '
             '<a href="/engagements/new">감사를 등록</a>하세요.</p>')
-        if cfg["mail_user"]:
+        if cfg["mail_accounts"]:
             auto = "켜짐" if cfg["auto_send"] else "꺼짐(미리보기에서 직접 보내기)"
+            users = ", ".join(a["user"] for a in cfg["mail_accounts"])
             mail_html += (f"<form method='post' action='/mail/fetch' class='row' style='margin-top:10px'>"
                           f"<button class='ghost'>받은 메일 지금 확인</button>"
-                          f"<span class='mute'>{esc(cfg['mail_user'])} · {cfg['check_minutes']}분마다 확인 · 자동 발송 {auto}</span></form>")
+                          f"<span class='mute'>{esc(users)} · {cfg['check_minutes']}분마다 확인 · 자동 발송 {auto}</span></form>")
         else:
             mail_html += "<p class='mute'><a href='/settings#mail'>메일 계정을 연결</a>하면 여기서 바로 보내고, 받은 첨부를 자동으로 저장합니다.</p>"
         if self.app.log:
@@ -278,17 +282,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── 회사 ──────────────────────────────────────────
     def clients(self):
+        cfg = self.app.cfg()
+        senders = [("", "기본 계정")] + [(a["user"], a["user"]) for a in cfg["mail_accounts"]]
         rows = []
         for c in self.store.clients():
+            fid = f"c{c['id']}"
             rows.append(
-                f"<tr><form method='post' action='/clients/{c['id']}'>"
-                f"<td><input name='seq' value='{esc(c['seq'])}' size='3'></td><td>{esc(c['code'])}</td>"
-                f"<td><input name='name' value='{esc(c['name'])}'></td>"
-                f"<td><select name='industry'>{options([(k, k) for k in pbc.TEMPLATES], c['industry'])}</select></td>"
-                f"<td><input name='contact_name' value='{esc(c['contact_name'])}' size='8'></td>"
-                f"<td><input name='contact_email' value='{esc(c['contact_email'])}'></td>"
-                f"<td><input name='cc' value='{esc(c['cc'])}' placeholder='쉼표로 구분'></td>"
-                f"<td><button class='ghost'>저장</button></td></form></tr>")
+                f"<tr><td><form id='{fid}' method='post' action='/clients/{c['id']}'></form>"
+                f"<input form='{fid}' name='seq' value='{esc(c['seq'])}' style='width:48px;min-width:0'></td>"
+                f"<td>{esc(c['code'])}</td>"
+                f"<td><input form='{fid}' name='name' value='{esc(c['name'])}'></td>"
+                f"<td><select form='{fid}' name='industry'>{options([(k, k) for k in pbc.TEMPLATES], c['industry'])}</select></td>"
+                f"<td><input form='{fid}' name='contact_name' value='{esc(c['contact_name'])}'></td>"
+                f"<td><input form='{fid}' name='contact_email' value='{esc(c['contact_email'])}'></td>"
+                f"<td><input form='{fid}' name='cc' value='{esc(c['cc'])}' placeholder='쉼표로 구분'></td>"
+                f"<td><select form='{fid}' name='send_from'>{options(senders, c['send_from'])}</select></td>"
+                f"<td><button form='{fid}' class='ghost'>저장</button></td></tr>")
         body = f"""<div class="card"><h2 style="margin-top:0">새 회사</h2>
 <form method="post" action="/clients" class="row">
 <label>회사코드<input name="code" required placeholder="C001" size="6"></label>
@@ -299,8 +308,8 @@ class Handler(BaseHTTPRequestHandler):
 <label>참조(CC)<input name="cc" placeholder="쉼표로 구분"></label>
 <button>등록</button></form>
 <p class="mute">순번은 폴더 규칙의 {{회사순번}}(예: 01.회사명)에 쓰입니다.</p></div>
-<div class="card"><table><tr><th>순번</th><th>코드</th><th>회사명</th><th>업종</th><th>담당자</th><th>이메일</th><th>참조</th><th></th></tr>
-{''.join(rows) or '<tr><td colspan=8 class=mute>아직 없습니다.</td></tr>'}</table></div>"""
+<div class="card"><table><tr><th>순번</th><th>코드</th><th>회사명</th><th>업종</th><th>담당자</th><th>이메일</th><th>참조</th><th>보내는 계정</th><th></th></tr>
+{''.join(rows) or '<tr><td colspan=9 class=mute>아직 없습니다.</td></tr>'}</table></div>"""
         self._send(page("회사", body, *self._flash()))
 
     def client_add(self):
@@ -313,7 +322,8 @@ class Handler(BaseHTTPRequestHandler):
         f, _ = self._form()
         self.store.update_client(int(cid), name=f.get("name", "").strip(), seq=int(f.get("seq") or 1),
                                  contact_name=f.get("contact_name", ""), contact_email=f.get("contact_email", ""),
-                                 cc=f.get("cc", ""), industry=f.get("industry", "일반"))
+                                 cc=f.get("cc", ""), industry=f.get("industry", "일반"),
+                                 send_from=f.get("send_from", ""))
         self._redirect("/clients", "저장했습니다.")
 
     # ── 감사 등록 ─────────────────────────────────────
@@ -504,10 +514,11 @@ class Handler(BaseHTTPRequestHandler):
         base = f"/e/{e['id']}/mail/{kind}/{on}"
         attach = "첨부: 자료요청목록.xlsx" if kind == "request" else ""
         after = "요청 항목이 '요청' 상태로 바뀌고 " if kind == "request" else ""
+        sender = mailbox.sender_for(cfg, e)
         send_btn = (f'<form method="post" action="{base}/send" style="display:inline" '
-                    f'onsubmit="return confirm({esc(json.dumps(d.to + " 에게 지금 보냅니다.", ensure_ascii=False))})">'
+                    f'onsubmit="return confirm({esc(json.dumps(f"{sender} 계정으로 {d.to} 에게 지금 보냅니다.", ensure_ascii=False))})">'
                     f'<button>지금 보내기</button></form> '
-                    if cfg.get("mail_user") and d.to else "")
+                    if cfg["mail_accounts"] and d.to else "")
         actions = ('<p class="mute">이미 보낸 메일입니다.</p>' if sent else
                    f"""<p>{send_btn}<a class="btn ghost" href="{base}.eml">아웃룩으로 열기 (.eml)</a>
 <form method="post" action="{base}/sent" style="display:inline"><button class="ghost">보냄으로 표시</button></form></p>
@@ -541,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
         if not d.to:
             raise ValueError("회사 담당자 이메일이 없습니다.")
         try:
-            mailbox.send(cfg, mailer.message_for(self.store, cfg, e, d))
+            mailbox.send(cfg, mailer.message_for(self.store, cfg, e, d), mailbox.sender_for(cfg, e))
         except (OSError, mailbox.smtplib.SMTPException) as exc:
             raise ValueError(f"보내지 못했습니다: {exc}") from exc
         schedule.record_sent(self.store, d, self.app.today())
@@ -561,35 +572,66 @@ class Handler(BaseHTTPRequestHandler):
         matched = sum(1 for f in r.saved if f["matched"])
         msg = (f"새 메일 {r.checked}통 확인: 첨부 {len(r.saved)}개 저장(항목 연결 {matched}개), "
                f"대용량 링크 {r.links}개, 감사와 관계없는 메일 {r.skipped}통")
+        if r.errors:
+            msg += " / 실패: " + "; ".join(r.errors)
         self.app.note([msg])
-        self._redirect("/", msg)
+        self._redirect("/", msg, error=bool(r.errors) and not r.checked)
 
     def mail_account_save(self):
         f, _ = self._form()
-        provider = f.get("mail_provider", "직접 입력")
-        new = {"mail_provider": provider, "mail_user": f.get("mail_user", "").strip()}
+        user = f.get("user", "").strip()
+        if "@" not in user:
+            raise ValueError("메일 주소를 넣어 주세요.")
+        provider = f.get("provider", "직접 입력")
         preset = mailbox.PRESETS.get(provider, {})
+        acc = {"user": user, "provider": provider}
         for k in ("imap_host", "smtp_host"):
-            new[k] = (f.get(k) or preset.get(k, "")).strip()
-        for k in ("imap_port", "smtp_port", "send_hour", "check_minutes"):
-            v = f.get(k) or preset.get(k)
-            if v not in (None, ""):
-                new[k] = int(v)
-        if not 0 <= new.get("send_hour", 9) <= 23 or new.get("check_minutes", 10) < 1:
-            raise ValueError("발송 시각은 0~23시, 확인 주기는 1분 이상으로 넣어 주세요.")
-        new["auto_send"] = f.get("auto_send") == "1"
-        for k, v in new.items():
-            self.store.set_setting(k, v)
-        note = "메일 계정을 저장했습니다."
+            acc[k] = (f.get(k) or preset.get(k, "")).strip()
+            if not acc[k]:
+                raise ValueError("받기·보내기 서버 주소를 넣어 주세요.")
+        for k in ("imap_port", "smtp_port"):
+            acc[k] = int(f.get(k) or preset.get(k) or 0)
+        cfg = self.app.cfg()
+        accounts = [a for a in cfg["mail_accounts"] if a["user"] != user]
+        old = next((i for i, a in enumerate(cfg["mail_accounts"]) if a["user"] == user), len(accounts))
+        accounts.insert(old, acc)
+        self.store.set_setting("mail_accounts", accounts)
+        if not cfg["send_from"]:
+            self.store.set_setting("send_from", user)
+        note = f"{user} 계정을 저장했습니다."
         if f.get("password"):
-            note += " " + mailbox.set_password(new["mail_user"], f["password"], remember=f.get("remember") == "1")
+            note += " " + mailbox.set_password(user, f["password"], remember=f.get("remember") == "1")
         self._redirect("/settings#mail", note)
 
+    def mail_account_delete(self):
+        f, _ = self._form()
+        user = f.get("user", "")
+        cfg = self.app.cfg()
+        accounts = [a for a in cfg["mail_accounts"] if a["user"] != user]
+        self.store.set_setting("mail_accounts", accounts)
+        if cfg["send_from"] == user:
+            self.store.set_setting("send_from", accounts[0]["user"] if accounts else "")
+        mailbox._PASSWORD.pop(user, None)
+        from . import credstore
+        credstore.delete(user)
+        self._redirect("/settings#mail", f"{user} 계정을 지웠습니다.")
+
+    def mail_options_save(self):
+        f, _ = self._form()
+        new = {"send_from": f.get("send_from", ""), "auto_send": f.get("auto_send") == "1",
+               "send_hour": int(f.get("send_hour") or 9), "check_minutes": int(f.get("check_minutes") or 10)}
+        if not 0 <= new["send_hour"] <= 23 or new["check_minutes"] < 1:
+            raise ValueError("발송 시각은 0~23시, 확인 주기는 1분 이상으로 넣어 주세요.")
+        for k, v in new.items():
+            self.store.set_setting(k, v)
+        self._redirect("/settings#mail", "메일 설정을 저장했습니다.")
+
     def mail_test(self):
+        f, _ = self._form()
         try:
-            msg = mailbox.test_connection(self.app.cfg())
+            msg = mailbox.test_connection(self.app.cfg(), f.get("user") or None)
         except (OSError, mailbox.smtplib.SMTPException, imaplib_error()) as exc:
-            raise ValueError(f"연결 실패: {exc}") from exc
+            raise ValueError(f"{f.get('user', '')} 연결 실패: {exc}") from exc
         self._redirect("/settings#mail", msg)
 
     # ── 설정 ──────────────────────────────────────────
@@ -636,37 +678,52 @@ class Handler(BaseHTTPRequestHandler):
         self._send(page("설정", body, *self._flash()))
 
     def _mail_settings(self, cfg) -> str:
-        has_pw = bool(cfg["mail_user"]) and bool(mailbox.get_password(cfg["mail_user"]))
         provs = [(k, k) for k in mailbox.PRESETS] + [("직접 입력", "직접 입력")]
         presets = json.dumps(mailbox.PRESETS, ensure_ascii=False)
-
-        def v(k):
-            return esc(cfg[k])
-        return f"""<form method="post" action="/settings/mail" id="mail"><div class="card">
-<h2 style="margin-top:0">메일 계정</h2>
-<p class="mute">IMAP(받기)·SMTP(보내기)를 쓰는 메일이면 됩니다. 대부분 일반 비밀번호 대신 메일 설정에서 만든
-'앱 비밀번호'를 넣어야 합니다. 비밀번호는 데이터베이스에 저장하지 않습니다.</p>
-<div class="row">
-<label>메일<select name="mail_provider" id="prov">{options(provs, cfg['mail_provider'])}</select></label>
-<label>메일 주소<input name="mail_user" value="{v('mail_user')}" type="email"></label>
-<label>비밀번호 {'(저장됨, 바꿀 때만 입력)' if has_pw else ''}<input name="password" type="password" autocomplete="new-password"></label>
+        rows = []
+        for a in cfg["mail_accounts"]:
+            pw = "들어 있음" if mailbox.get_password(a["user"]) else "<span class='warn'>없음</span>"
+            u = esc(a["user"])
+            rows.append(
+                f"<tr><td>{u}{' (기본)' if a['user'] == cfg['send_from'] else ''}</td><td>{esc(a['provider'])}</td>"
+                f"<td class='mute'>{esc(a['imap_host'])}:{esc(a['imap_port'])} / {esc(a['smtp_host'])}:{esc(a['smtp_port'])}</td>"
+                f"<td>{pw}</td><td class='row'>"
+                f"<form method='post' action='/settings/mail-test'><input type='hidden' name='user' value='{u}'>"
+                f"<button class='ghost'>연결 시험</button></form>"
+                f"<button class='ghost' type='button' onclick='editAcc({esc(json.dumps(a, ensure_ascii=False))})'>고치기</button>"
+                f"<form method='post' action='/settings/mail-delete' onsubmit='return confirm(\"이 계정을 지웁니다.\")'>"
+                f"<input type='hidden' name='user' value='{u}'><button class='ghost'>지우기</button></form></td></tr>")
+        table = ("<table><tr><th>계정</th><th>메일</th><th>서버 (받기 / 보내기)</th><th>비밀번호</th><th></th></tr>"
+                 + "".join(rows) + "</table>") if rows else "<p class='mute'>아직 연결한 계정이 없습니다.</p>"
+        senders = [(a["user"], a["user"]) for a in cfg["mail_accounts"]]
+        return f"""<div class="card" id="mail"><h2 style="margin-top:0">메일 계정</h2>
+<p class="mute">계정을 여러 개 넣을 수 있습니다. 받은 메일은 모든 계정에서 확인하고, 보낼 때는 기본 계정(또는 회사 화면에서
+회사마다 정한 계정)을 씁니다. 대부분 일반 비밀번호 대신 메일 설정에서 만든 '앱 비밀번호'를 넣어야 하며,
+비밀번호는 데이터베이스에 저장하지 않습니다.</p>{table}
+<h2>계정 추가·고치기</h2><form method="post" action="/settings/mail"><div class="row">
+<label>메일<select name="provider" id="prov">{options(provs, 'Gmail')}</select></label>
+<label>메일 주소<input name="user" id="acc_user" type="email" required></label>
+<label>비밀번호 (바꿀 때만)<input name="password" type="password" autocomplete="new-password"></label>
 <label style="flex-direction:row;gap:4px"><input type="checkbox" name="remember" value="1">윈도우 자격 증명 관리자에 저장</label>
 </div><div class="row" style="margin-top:8px">
-<label>받기 서버<input name="imap_host" id="imap_host" value="{v('imap_host')}"></label>
-<label>포트<input name="imap_port" id="imap_port" value="{v('imap_port')}" size="4"></label>
-<label>보내기 서버<input name="smtp_host" id="smtp_host" value="{v('smtp_host')}"></label>
-<label>포트<input name="smtp_port" id="smtp_port" value="{v('smtp_port')}" size="4"></label>
-</div><div class="row" style="margin-top:8px">
-<label>받은 메일 확인 (분마다)<input name="check_minutes" value="{v('check_minutes')}" size="3"></label>
+<label>받기 서버<input name="imap_host" id="imap_host" value="imap.gmail.com"></label>
+<label>포트<input name="imap_port" id="imap_port" value="993" size="4"></label>
+<label>보내기 서버<input name="smtp_host" id="smtp_host" value="smtp.gmail.com"></label>
+<label>포트<input name="smtp_port" id="smtp_port" value="465" size="4"></label>
+<button>계정 저장</button></div></form>
+<h2>보내기·확인 설정</h2><form method="post" action="/settings/mail-options"><div class="row">
+<label>기본 보내는 계정<select name="send_from">{options(senders, cfg['send_from'])}</select></label>
+<label>받은 메일 확인 (분마다)<input name="check_minutes" value="{esc(cfg['check_minutes'])}" size="3"></label>
 <label style="flex-direction:row;gap:4px"><input type="checkbox" name="auto_send" value="1" {'checked' if cfg['auto_send'] else ''}>
 요청·독촉 메일 자동 발송</label>
-<label>발송 시각 (시)<input name="send_hour" value="{v('send_hour')}" size="3"></label>
-</div><p class="mute">자동 발송을 켜면 매일 발송 시각 이후 '오늘 보낼 메일'을 회사 담당자에게 보냅니다.
-처음에는 끈 채로 미리보기에서 [지금 보내기]로 몇 번 보내 보고 켜기를 권합니다. 프로그램이 켜져 있을 때만 동작합니다.</p>
-<p><button>메일 계정 저장</button></p></div></form>
-<form method="post" action="/settings/mail-test"><button class="ghost">연결 시험</button></form>
-<script>const P={presets};document.getElementById('prov').onchange=function(){{const p=P[this.value];if(!p)return;
-for(const k in p)document.getElementById(k).value=p[k];}};</script>"""
+<label>발송 시각 (시)<input name="send_hour" value="{esc(cfg['send_hour'])}" size="3"></label>
+<button class="ghost">저장</button></div></form>
+<p class="mute">자동 발송을 켜면 매일 발송 시각 이후 '오늘 보낼 메일'을 회사 담당자에게 보냅니다.
+처음에는 끈 채로 미리보기에서 [지금 보내기]로 몇 번 보내 보고 켜기를 권합니다. 프로그램이 켜져 있을 때만 동작합니다.</p></div>
+<script>const P={presets};const $=id=>document.getElementById(id);
+$('prov').onchange=function(){{const p=P[this.value];if(!p)return;for(const k in p)$(k).value=p[k];}};
+function editAcc(a){{$('prov').value=a.provider;$('acc_user').value=a.user;
+for(const k of ['imap_host','imap_port','smtp_host','smtp_port'])$(k).value=a[k];$('acc_user').scrollIntoView();}}</script>"""
 
     def settings_save(self):
         f, _ = self._form()

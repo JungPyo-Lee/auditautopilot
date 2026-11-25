@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS clients (
   contact_name TEXT NOT NULL DEFAULT '',
   contact_email TEXT NOT NULL DEFAULT '',
   cc TEXT NOT NULL DEFAULT '',
-  industry TEXT NOT NULL DEFAULT '일반'
+  industry TEXT NOT NULL DEFAULT '일반',
+  send_from TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS engagements (
   id INTEGER PRIMARY KEY,
@@ -110,6 +111,10 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(clients)")}
+        if "send_from" not in cols:   # 이전 데이터베이스에 열 추가
+            self.conn.execute("ALTER TABLE clients ADD COLUMN send_from TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
 
     @contextmanager
     def tx(self):
@@ -156,7 +161,7 @@ class Store:
         return cur.lastrowid
 
     def update_client(self, client_id: int, **fields) -> None:
-        allowed = {"name", "seq", "contact_name", "contact_email", "cc", "industry"}
+        allowed = {"name", "seq", "contact_name", "contact_email", "cc", "industry", "send_from"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -206,7 +211,7 @@ class Store:
                           (*sets.values(), engagement_id))
 
     _ENG_SQL = ("SELECT e.*, c.code AS client_code, c.name AS client_name, c.seq AS client_seq, "
-                "c.contact_name, c.contact_email, c.cc, c.industry "
+                "c.contact_name, c.contact_email, c.cc, c.industry, c.send_from "
                 "FROM engagements e JOIN clients c ON c.id = e.client_id")
 
     def engagements(self) -> list[dict]:

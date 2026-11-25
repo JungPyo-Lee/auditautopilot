@@ -61,13 +61,10 @@ DEFAULTS = {
     "reminder_subject": REMINDER_SUBJECT,
     "reminder_body": REMINDER_BODY,
     "dday_body": DDAY_BODY,
-    # 메일 계정 (비밀번호는 여기에 저장하지 않는다)
-    "mail_provider": "Gmail",
-    "mail_user": "",
-    "imap_host": "imap.gmail.com",
-    "imap_port": 993,
-    "smtp_host": "smtp.gmail.com",
-    "smtp_port": 465,
+    # 메일 계정 여러 개: [{user, provider, imap_host, imap_port, smtp_host, smtp_port}]
+    # 비밀번호는 여기에 저장하지 않는다
+    "mail_accounts": [],
+    "send_from": "",          # 기본 보내는 계정 (회사별로 따로 정할 수 있다)
     "auto_send": False,       # 켜면 매일 send_hour 이후 오늘 메일을 자동 발송
     "send_hour": 9,
     "check_minutes": 10,      # 받은 메일 확인 주기
@@ -75,4 +72,15 @@ DEFAULTS = {
 
 
 def load(store) -> dict:
-    return {k: store.get_setting(k, v) for k, v in DEFAULTS.items()}
+    cfg = {k: store.get_setting(k, v) for k, v in DEFAULTS.items()}
+    if not cfg["mail_accounts"] and store.get_setting("mail_user"):
+        # 계정 하나만 있던 이전 설정을 옮긴다
+        old = {k: store.get_setting(k) for k in ("mail_user", "mail_provider", "imap_host", "imap_port",
+                                                   "smtp_host", "smtp_port")}
+        cfg["mail_accounts"] = [{"user": old["mail_user"], "provider": old["mail_provider"] or "직접 입력",
+                                 "imap_host": old["imap_host"], "imap_port": old["imap_port"],
+                                 "smtp_host": old["smtp_host"], "smtp_port": old["smtp_port"]}]
+        cfg["send_from"] = cfg["send_from"] or old["mail_user"]
+        store.set_setting("mail_accounts", cfg["mail_accounts"])
+        store.set_setting("send_from", cfg["send_from"])
+    return cfg
