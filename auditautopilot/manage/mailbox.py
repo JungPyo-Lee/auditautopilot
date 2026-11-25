@@ -86,15 +86,45 @@ def account(cfg: dict, user: str | None = None) -> dict:
 
 
 # ── 보내기 ────────────────────────────────────────────
-def _smtp(acc: dict):
+ALT_SMTP_PORT = {465: 587, 587: 465}
+# 연결이 끊기거나 암호화 방식이 안 맞을 때만 다른 포트로 다시 해 본다 (비밀번호 오류는 다시 하지 않는다)
+_RETRY = (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, ssl.SSLError, ConnectionError, TimeoutError)
+
+
+def _smtp_once(host: str, port: int, user: str, password: str):
     ctx = ssl.create_default_context()
-    if acc["smtp_port"] == 465:
-        s = smtplib.SMTP_SSL(acc["smtp_host"], acc["smtp_port"], context=ctx, timeout=30)
+    if port == 465:
+        s = smtplib.SMTP_SSL(host, port, context=ctx, timeout=30)
     else:
-        s = smtplib.SMTP(acc["smtp_host"], acc["smtp_port"], timeout=30)
+        s = smtplib.SMTP(host, port, timeout=30)
+        s.ehlo()
         s.starttls(context=ctx)
-    s.login(acc["user"], acc["password"])
+        s.ehlo()
+    try:
+        s.login(user, password)
+    except Exception:
+        try:
+            s.close()
+        except Exception:
+            pass
+        raise
     return s
+
+
+def _smtp(acc: dict):
+    """정해 둔 포트로 먼저 연결하고, 끊기면 465(SSL) ↔ 587(STARTTLS)로 한 번 더 해 본다.
+    돌려주는 값: (연결, 실제로 된 포트)"""
+    port = acc["smtp_port"]
+    try:
+        return _smtp_once(acc["smtp_host"], port, acc["user"], acc["password"]), port
+    except _RETRY as first:
+        alt = ALT_SMTP_PORT.get(port)
+        if alt is None:
+            raise
+        try:
+            return _smtp_once(acc["smtp_host"], alt, acc["user"], acc["password"]), alt
+        except _RETRY:
+            raise first
 
 
 def send(cfg: dict, msg: EmailMessage, user: str | None = None) -> None:
@@ -102,7 +132,7 @@ def send(cfg: dict, msg: EmailMessage, user: str | None = None) -> None:
     del msg["X-Unsent"]
     del msg["From"]
     msg["From"] = acc["user"]   # 로그인한 계정과 보내는 주소를 맞춘다 (다르면 거절하는 메일이 많다)
-    s = _smtp(acc)
+    s, _ = _smtp(acc)
     try:
         s.send_message(msg)
     finally:
@@ -112,14 +142,77 @@ def send(cfg: dict, msg: EmailMessage, user: str | None = None) -> None:
             pass
 
 
-def test_connection(cfg: dict, user: str | None = None) -> str:
+def explain(exc: BaseException, acc: dict, step: str) -> str:
+    """오류를 사람이 읽을 수 있는 말로 바꾼다"""
+    host = acc["smtp_host"] if step == "smtp" else acc["imap_host"]
+    gmail = "gmail" in host
+    if isinstance(exc, smtplib.SMTPAuthenticationError) or (
+            isinstance(exc, imaplib.IMAP4.error) and re.search(r"AUTH|LOGIN|credential|password", str(exc), re.I)):
+        if gmail:
+            return ("로그인 거절: Gmail 일반 비밀번호는 안 되고 16자리 '앱 비밀번호'를 넣어야 합니다. "
+                    "Google 계정 > 보안 > 2단계 인증을 켠 뒤 '앱 비밀번호'에서 만들 수 있습니다.")
+        return "로그인 거절: 아이디나 비밀번호(앱 비밀번호)를 확인해 주세요. 2단계 인증을 쓰면 앱 비밀번호가 필요합니다."
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return ("보안 인증서 확인 실패: PC 백신의 '메일 검사/SSL 검사' 기능이 연결을 가로채는 경우가 많습니다. "
+                "백신에서 메일 보호(SSL 검사)를 끄거나 이 프로그램을 예외로 넣어 보세요.")
+    if isinstance(exc, (smtplib.SMTPServerDisconnected, ConnectionError, ssl.SSLError)):
+        tip = "PC 백신(메일 보호)이나 회사 방화벽이 보내기 포트(465·587)를 막고 있을 가능성이 큽니다."
+        if not gmail:
+            tip = "웹메일 환경설정에서 'IMAP/SMTP 사용'을 켰는지 확인해 주세요. 그래도 안 되면 " + tip
+        return f"서버가 연결을 끊었습니다 (465와 587 모두 시도). {tip}"
+    if isinstance(exc, (TimeoutError, OSError)):
+        return f"서버({host})에 닿지 않습니다. 인터넷 연결, 서버 주소·포트, 방화벽을 확인해 주세요."
+    return str(exc)
+
+
+@dataclass
+class ConnTest:
+    user: str
+    smtp_ok: bool = False
+    smtp_msg: str = ""
+    smtp_port: int | None = None      # 실제로 된 포트 (설정과 다르면 바꿔 저장)
+    imap_ok: bool = False
+    imap_msg: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.smtp_ok and self.imap_ok
+
+    def summary(self) -> str:
+        mark = lambda ok: "성공" if ok else "실패"
+        return (f"{self.user} 연결 시험 — 보내기(SMTP) {mark(self.smtp_ok)}: {self.smtp_msg} / "
+                f"받기(IMAP) {mark(self.imap_ok)}: {self.imap_msg}")
+
+
+def test_connection(cfg: dict, user: str | None = None) -> ConnTest:
+    """보내기와 받기를 따로 시험해서 어디서 막혔는지 알려준다"""
     acc = account(cfg, user)
-    s = _smtp(acc)
-    s.quit()
-    m = imaplib.IMAP4_SSL(acc["imap_host"], acc["imap_port"], ssl_context=ssl.create_default_context())
-    m.login(acc["user"], acc["password"])
-    m.logout()
-    return f"{acc['user']}: 보내기(SMTP)와 받기(IMAP) 모두 연결됐습니다."
+    r = ConnTest(acc["user"])
+    try:
+        s, port = _smtp(acc)
+        try:
+            s.quit()
+        except Exception:
+            pass
+        r.smtp_ok, r.smtp_port = True, port
+        r.smtp_msg = f"{acc['smtp_host']}:{port} 연결됨"
+        if port != acc["smtp_port"]:
+            r.smtp_msg += f" ({acc['smtp_port']} 대신 {port}번으로 바꿔 저장)"
+    except Exception as exc:  # noqa: BLE001 - 어떤 오류든 화면에 설명해 준다
+        r.smtp_msg = explain(exc, acc, "smtp") + f" [원래 오류: {exc or type(exc).__name__}]"
+    try:
+        m = imaplib.IMAP4_SSL(acc["imap_host"], acc["imap_port"], ssl_context=ssl.create_default_context())
+        try:
+            m.login(acc["user"], acc["password"])
+        finally:
+            try:
+                m.logout()
+            except Exception:
+                pass
+        r.imap_ok, r.imap_msg = True, f"{acc['imap_host']}:{acc['imap_port']} 연결됨"
+    except Exception as exc:  # noqa: BLE001
+        r.imap_msg = explain(exc, acc, "imap") + f" [원래 오류: {exc or type(exc).__name__}]"
+    return r
 
 
 # ── 받기 ──────────────────────────────────────────────

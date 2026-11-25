@@ -79,6 +79,13 @@ IMAP(받기)·SMTP(보내기)를 쓰는 메일이면 된다. 계정은 여러 �
 비밀번호는 데이터베이스에 저장하지 않는다. 프로그램이 켜져 있는 동안 메모리에만 두고, 윈도우에서는 원하면
 '자격 증명 관리자'(제어판)에 `auditautopilot:메일주소`로 저장한다.
 
+[연결 시험]은 보내기(SMTP)와 받기(IMAP)를 따로 시험해서 어디서 막혔는지 보여준다. 보내기가 465(SSL)에서 끊기면
+587(STARTTLS)로, 587에서 끊기면 465로 한 번 더 시도하고, 된 포트를 그 계정 설정에 저장한다.
+- `Connection unexpectedly closed`: 로그인 전에 연결이 끊긴 것이다. 비밀번호 문제가 아니라 PC 백신의 메일 보호(SSL 검사)나
+  방화벽이 포트를 막는 경우가 많다. 다음·네이버는 웹메일 설정에서 IMAP/SMTP 사용을 켜야 한다.
+- `535`/`AUTHENTICATIONFAILED`: 비밀번호 거절. Gmail은 2단계 인증을 켠 뒤 만든 16자리 앱 비밀번호를 넣는다
+  ([앱 비밀번호로 로그인 (Google 고객센터)](https://support.google.com/accounts/answer/185833?hl=ko)).
+
 ## 관리 화면 쓰는 순서
 
 1. `python -m auditautopilot serve` → 브라우저에서 http://127.0.0.1:8765

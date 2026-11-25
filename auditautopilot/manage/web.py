@@ -115,8 +115,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _redirect(self, to: str, flash: str = "", error: bool = False):
         if flash:
+            to, hash_, frag = to.partition("#")      # 메시지는 #앞에 붙여야 화면에 보인다
             sep = "&" if "?" in to else "?"
-            to += f"{sep}{'err' if error else 'msg'}={urllib.parse.quote(flash)}"
+            to += f"{sep}{'err' if error else 'msg'}={urllib.parse.quote(flash)}" + hash_ + frag
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", to)
         self.send_header("Content-Length", "0")
@@ -628,11 +629,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def mail_test(self):
         f, _ = self._form()
-        try:
-            msg = mailbox.test_connection(self.app.cfg(), f.get("user") or None)
-        except (OSError, mailbox.smtplib.SMTPException, imaplib_error()) as exc:
-            raise ValueError(f"{f.get('user', '')} 연결 실패: {exc}") from exc
-        self._redirect("/settings#mail", msg)
+        cfg = self.app.cfg()
+        r = mailbox.test_connection(cfg, f.get("user") or None)
+        if r.smtp_port:
+            accs = cfg["mail_accounts"]
+            for a in accs:
+                if a["user"] == r.user and int(a["smtp_port"]) != r.smtp_port:
+                    a["smtp_port"] = r.smtp_port    # 실제로 된 포트를 기억한다
+                    self.store.set_setting("mail_accounts", accs)
+        if r.ok:
+            self._redirect("/settings#mail", r.summary())
+        else:
+            raise ValueError(r.summary())
 
     # ── 설정 ──────────────────────────────────────────
     def settings(self):

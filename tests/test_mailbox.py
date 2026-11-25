@@ -12,9 +12,18 @@ from auditautopilot.manage.db import Store
 
 class FakeSMTP:
     sent: list = []
+    blocked: set = set()          # 이 포트로 오면 연결을 끊는다 (백신·방화벽 흉내)
 
     def __init__(self, host, port, context=None, timeout=None):
         self.host, self.port, self.tls = host, port, port == 465
+        if port in FakeSMTP.blocked:
+            raise mailbox.smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    def ehlo(self):
+        pass
+
+    def close(self):
+        pass
 
     def starttls(self, context=None):
         self.tls = True
@@ -66,6 +75,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(mailbox.smtplib, "SMTP", FakeSMTP)
     monkeypatch.setattr(mailbox.imaplib, "IMAP4_SSL", FakeIMAP)
     FakeSMTP.sent = []
+    FakeSMTP.blocked = set()
     FakeIMAP.messages = {}
     FakeIMAP.fail = set()
     mailbox._PASSWORD.clear()
@@ -256,7 +266,38 @@ def test_web_mail_settings_and_send(env, monkeypatch):
         assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {}) == 303
         assert len(FakeSMTP.sent) == 1 and s.request_sent(e["id"]) and FakeSMTP.sent[0]["From"] == "me@naver.com"
         assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
+        FakeSMTP.blocked = {465}       # 465가 막혀 있으면 587로 되고, 그 포트를 기억한다
+        assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
+        gm = next(a for a in config.load(s)["mail_accounts"] if a["user"] == "me@gmail.com")
+        assert gm["smtp_port"] == 587
+        FakeSMTP.blocked = {465, 587}
+        assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303   # 실패는 설명과 함께 되돌아간다
+        FakeSMTP.blocked = set()
         assert post("/mail/fetch", {}) == 303
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_connection_falls_back_to_587_and_explains(env):
+    s, e = env
+    cfg = config.load(s)
+    r = mailbox.test_connection(cfg, "me@gmail.com")
+    assert r.ok and r.smtp_port == 465
+
+    FakeSMTP.blocked = {465}
+    r = mailbox.test_connection(cfg, "me@gmail.com")
+    assert r.ok and r.smtp_port == 587 and "587" in r.smtp_msg
+    d = schedule.due_drafts(s, e, date(2027, 1, 4), cfg)[0]
+    mailbox.send(cfg, mailer.message_for(s, cfg, e, d))       # 보내기도 587로 넘어간다
+    assert len(FakeSMTP.sent) == 1
+
+    FakeSMTP.blocked = {465, 587}
+    r = mailbox.test_connection(cfg, "me@gmail.com")
+    assert not r.smtp_ok and r.imap_ok                         # 받기는 되고 보내기만 막힘
+    assert "백신" in r.smtp_msg and "Connection unexpectedly closed" in r.smtp_msg
+
+    FakeSMTP.blocked = set()
+    mailbox.set_password("me@gmail.com", "wrong")
+    r = mailbox.test_connection(cfg, "me@gmail.com")
+    assert not r.smtp_ok and "앱 비밀번호" in r.smtp_msg and r.smtp_port is None
