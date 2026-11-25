@@ -205,6 +205,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/aje-template\.xlsx", "aje_template"),
         ("POST", r"/e/(\d+)/adjust", "adjust_make"),
         ("GET", r"/e/(\d+)/adjusted\.xlsx", "adjusted_xlsx"),
+        ("GET", r"/e/(\d+)/notes-request\.xlsx", "notes_request"),
+        ("GET", r"/e/(\d+)/report\.docx", "report_docx"),
         ("POST", r"/e/(\d+)/questions", "question_add"),
         ("POST", r"/e/(\d+)/questions/act", "question_act"),
         ("POST", r"/e/(\d+)/questions/(\d+)", "question_edit"),
@@ -653,7 +655,53 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 <label>조서 (비우면 마지막으로 채운 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
 <button>수정분개 반영</button></form>
 <p class="mute">조서에 AJE·정산표·수정후BS·수정후IS·현금흐름정산표 탭을 더하고, 리드시트 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿉니다.
-모든 금액이 수식으로 이어져 있고 탭마다 검증 칸(0이어야 함)이 있습니다. 다시 올리면 그 탭들을 새로 만듭니다.</p>{last}"""
+모든 금액이 수식으로 이어져 있고 탭마다 검증 칸(0이어야 함)이 있습니다. 다시 올리면 그 탭들을 새로 만듭니다.</p>{last}
+{self._closing_part(e, rec)}"""
+
+    def _closing_part(self, e, adj_rec) -> str:
+        eid = e["id"]
+        if not adj_rec:
+            return ""
+        opts = "".join(f"<option>{o}</option>" for o in ("적정", "한정", "부적정", "의견거절"))
+        return f"""<h3 id="closing">주석 자료 요청 · 감사보고서 초안</h3>
+<p class="row"><a class="btn ghost" href="/e/{eid}/notes-request.xlsx">주석 자료요청 양식 내려받기</a></p>
+<p class="mute">수정분개까지 반영한 금액을 미리 넣은 주석 시트(회색 칸)와 회사가 처음부터 채울 시트(특수관계자·담보·보험·토지 공시지가·약정·소송 등)로 나뉩니다.
+계정이 없는 주석은 빠집니다. 회사에 보내 채워 받으세요.</p>
+<form method="get" action="/e/{eid}/report.docx" class="row"><label>감사의견<select name="opinion">{opts}</select></label>
+<button class="ghost">감사보고서 초안 (워드)</button></form>
+<p class="mute">조서 '일반사항' 탭의 회사명·결산일·회계법인·감사종료일로 감사보고서 문구를 채우고, 뒤에 정산표 기준 재무제표 요약(회사 재무제표 대사용)을 붙입니다.
+적정이 아니면 근거 단락을 [ ]로 비워 둡니다.</p>"""
+
+    def _adjusted_workpaper(self, e) -> Path:
+        rec = self.store.get_setting(f"adjust:{e['id']}") or {}
+        p = Path(rec.get("path") or "")
+        if not rec or not p.exists():
+            raise ValueError("먼저 [수정분개 반영]을 해 주세요.")
+        return p
+
+    def notes_request(self, eid):
+        import tempfile
+
+        from ..workpaper import notes
+
+        e = self._eng(eid)
+        with tempfile.TemporaryDirectory() as tmp:
+            res = notes.request_workbook(self._adjusted_workpaper(e), Path(tmp) / "n.xlsx", e["client_name"])
+            data = res.output.read_bytes()
+        self._download(data, f"{e['client_name']}_주석자료요청.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
+
+    def report_docx(self, eid):
+        import tempfile
+
+        from ..workpaper import report
+
+        e = self._eng(eid)
+        opinion = (self._query().get("opinion") or "적정").strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _ = report.draft(self._adjusted_workpaper(e), Path(tmp) / "r.docx", opinion)
+            data = out.read_bytes()
+        self._download(data, f"{e['client_name']}_감사보고서_초안.docx",
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     def _last_workpaper(self, e) -> Path:
         rec = self.store.get_setting(f"leadsheet:{e['id']}") or {}
