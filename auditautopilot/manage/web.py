@@ -52,7 +52,17 @@ color:#fff;border-radius:5px;cursor:pointer;display:inline-block}button.ghost,.b
 pre{white-space:pre-wrap;font-family:inherit;background:#fafbfc;border:1px solid var(--line);padding:10px;border-radius:6px;margin:6px 0}
 .bar{height:8px;background:#e9ecf1;border-radius:4px;overflow:hidden;min-width:120px}
 .bar i{display:block;height:100%;background:#1d8a4e}
-button,.btn{white-space:nowrap}.card{overflow-x:auto}td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
+button,.btn{white-space:nowrap}.card{overflow-x:auto}
+.co{font-size:22px;margin:4px 0 2px}.steps{display:flex;gap:3px;margin:12px 0 4px}
+.steps a{flex:1;color:#fff;font-size:12px;text-align:center;padding:6px 4px;border-radius:4px;text-decoration:none;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.steps a.ok{background:#1d8a4e}.steps a.no{background:#c2362b}
+.ministeps{display:flex;gap:2px}.ministeps span{width:18px;height:12px;border-radius:2px;display:inline-block}
+.ministeps .ok{background:#1d8a4e}.ministeps .no{background:#c2362b}
+.tabs{display:flex;gap:2px;border-bottom:2px solid #9aa3b2;margin-top:14px;flex-wrap:wrap}
+.tabs a{padding:7px 14px;background:#e4e7ec;border:1px solid #c9ced6;border-bottom:none;border-radius:6px 6px 0 0;
+color:var(--ink);font-size:13px;text-decoration:none}.tabs a.on{background:#fff;font-weight:600;border-color:#9aa3b2;
+position:relative;top:2px;border-bottom:2px solid #fff}.tabs a i{font-style:normal;margin-right:4px}
+.js .tab{display:none}.js .tab.on{display:block}.tab{padding-top:14px}td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
 """
 
 
@@ -299,6 +309,65 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("감사 건을 찾지 못했습니다.")
         return e
 
+    # ── 진행 단계 ─────────────────────────────────────
+    STEPS = (("mail", "메일 일정"), ("pbc", "자료요청"), ("files", "받은자료"), ("questions", "질문서"),
+             ("confirm", "채권채무조회"), ("lead", "리드시트"), ("close", "수정분개·재무제표"))
+
+    def progress(self, e, cfg) -> list[tuple[str, str, bool, str]]:
+        """[(탭, 이름, 완료, 설명)] 업무 순서대로."""
+        eid = e["id"]
+        items = self.store.items(eid)
+        req = [i for i in items if i["status"] != "해당없음"]
+        out_items = [i for i in req if i["status"] in ("미요청", "요청", "일부수령", "보완요청")]
+        files = self.store.files(eid)
+        unfiled = [f for f in files if not f["item_id"]]
+        qs = questions.all_(self.store, eid)
+        open_q = [q for q in qs if q["status"] != "종결"]
+        a = confirmations.assess(confirmations.latest(self.store, eid), confirmations.materiality(self.store, eid),
+                                 float(cfg.get("confirm_min_reply_rate", 80)))
+        sent = self.store.request_sent(eid)
+        lead = self.store.get_setting(f"leadsheet:{eid}")
+        adj = self.store.get_setting(f"adjust:{eid}")
+        nf = self.store.get_setting(f"notes_filled:{eid}")
+        steps = [
+            (sent, "자료요청 메일 보냄" if sent else "자료요청 메일을 아직 안 보냄"),
+            (bool(req) and not out_items, f"미제출 {len(out_items)}건" if out_items else
+             ("요청 항목 없음" if not req else "모두 받음")),
+            (bool(files) and not unfiled, "받은 파일 없음" if not files else
+             (f"항목 미연결 {len(unfiled)}개" if unfiled else f"{len(files)}개 모두 항목에 연결")),
+            (bool(qs) and not open_q, "질문서 없음" if not qs else
+             (f"종결 안 된 질문 {len(open_q)}건" if open_q else "모두 종결")),
+            (bool(a and a["ok"]), "회신현황 없음" if a is None else
+             ("기준 충족" if a["ok"] else " / ".join(a["reasons"]))),
+            (bool(lead), "조서 채움" if lead else "조서를 아직 안 채움"),
+            (bool(adj and nf), "수정분개 반영·주석 자료 받음" if adj and nf else
+             ("주석 자료를 아직 안 받음" if adj else "수정분개를 아직 반영 안 함")),
+        ]
+        return [(k, lbl, ok, hint) for (k, lbl), (ok, hint) in zip(self.STEPS, steps)]
+
+    def _tabs(self, e, cfg, panels: dict[str, str]) -> str:
+        prog = self.progress(e, cfg)
+        done = sum(1 for p in prog if p[2])
+        bar = "".join(f"<a href='#tab-{k}' class='{'ok' if ok else 'no'}' title='{esc(lbl)}: {esc(hint)}'>"
+                      f"{'✓' if ok else '✗'} {esc(lbl)}</a>" for k, lbl, ok, hint in prog)
+        tabs = "".join(f"<a href='#tab-{k}' data-tab='{k}'><i style='color:{'#1d8a4e' if ok else '#c2362b'}'>●</i>"
+                       f"{esc(lbl)}</a>" for k, lbl, ok, _ in prog)
+        body = "".join(f"<section class='tab' id='tab-{k}'>{panels[k]}</section>" for k, *_ in prog)
+        return f"""<div class="steps">{bar}</div><p class="mute" style="margin:0">진행 {done}/{len(prog)} 단계 완료 ·
+막대에 마우스를 올리면 남은 일이 보입니다.</p>
+<nav class="tabs">{tabs}</nav>{body}
+<script>(function(){{document.body.classList.add('js');
+var tabs=document.querySelectorAll('.tabs a'),secs=document.querySelectorAll('section.tab');
+function show(k){{secs.forEach(function(s){{s.classList.toggle('on',s.id==='tab-'+k)}});
+tabs.forEach(function(a){{a.classList.toggle('on',a.dataset.tab===k)}});try{{localStorage.setItem('tab{e['id']}',k)}}catch(x){{}}}}
+function fromHash(){{var h=location.hash.slice(1);if(!h)return null;if(h.indexOf('tab-')===0)return h.slice(4);
+var el=document.getElementById(h);var s=el&&el.closest('section.tab');return s?s.id.slice(4):null}}
+var k=fromHash();if(!k){{try{{k=localStorage.getItem('tab{e['id']}')}}catch(x){{}}}}show(k||'mail');
+var el=location.hash&&document.getElementById(location.hash.slice(1));if(el&&el.tagName!=='SECTION')setTimeout(function(){{el.scrollIntoView()}},0);
+window.addEventListener('hashchange',function(){{var k=fromHash();if(k)show(k)}});
+document.querySelectorAll('.steps a,.tabs a').forEach(function(a){{a.addEventListener('click',function(ev){{
+ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replaceState(null,'','#tab-'+k)}})}});}})();</script>"""
+
     # ── 현황 ──────────────────────────────────────────
     def home(self):
         cfg, today = self.app.cfg(), self.app.today()
@@ -326,13 +395,17 @@ class Handler(BaseHTTPRequestHandler):
                     else f"<a href='/e/{e['id']}#confirm' class='badge-bad' title='{esc(' / '.join(a['reasons']))}'>회신 {a['rate']}%</a>"))
             done = e["total"] - e["outstanding"]
             pct = int(done / e["total"] * 100) if e["total"] else 0
+            prog = self.progress(e, cfg)
+            mini = ("<div class='ministeps'>" + "".join(
+                f"<a href='/e/{e['id']}#tab-{k}' title='{esc(lbl)}: {esc(hint)}'><span class='{'ok' if ok else 'no'}'></span></a>"
+                for k, lbl, ok, hint in prog) + f"</div><span class='mute'>{sum(p[2] for p in prog)}/{len(prog)}</span>")
             erows.append(
                 f"<tr><td><a href='/e/{e['id']}'>{esc(e['client_code'])} {esc(e['client_name'])}</a></td>"
                 f"<td>{esc(e['fiscal_year'])} {esc(e['kind'])}</td>"
-                f"<td>{esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}</td>"
+                f"<td>{esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}</td><td>{mini}</td>"
                 f"<td><div class='bar'><i style='width:{pct}%'></i></div><span class='mute'>{done}/{e['total']}</span></td>"
                 f"<td>{e['outstanding']}건</td><td>{conf}</td><td>{esc(f'{nxt.on} {nxt.label}') if nxt else '-'}</td></tr>")
-        eng_html = ("<table><tr><th>회사</th><th>감사</th><th>현장감사</th><th>수령</th><th>미제출</th><th>채권채무 조회</th><th>다음 메일</th></tr>"
+        eng_html = ("<table><tr><th>회사</th><th>감사</th><th>현장감사</th><th title=\"" + " → ".join(l for _, l in self.STEPS) + "\">업무 진행 (" + str(len(self.STEPS)) + "단계)</th><th>수령</th><th>미제출</th><th>채권채무 조회</th><th>다음 메일</th></tr>"
                     + "".join(erows) + "</table>") if erows else (
             '<p class="mute">등록된 감사가 없습니다. <a href="/clients">회사</a>를 먼저 등록하고 '
             '<a href="/engagements/new">감사를 등록</a>하세요.</p>')
@@ -480,23 +553,23 @@ class Handler(BaseHTTPRequestHandler):
         links_html = (f"<h2>대용량 링크 (직접 내려받기 필요)</h2><p class='mute'>링크에서 내려받아 위 수신함 폴더에 넣고 "
                       f"[수신함 정리]를 누르세요.</p><table><tr><th>받은 날</th><th>보낸 사람·제목</th><th>링크</th><th></th></tr>"
                       f"{lrows}</table>") if lrows else ""
-        body = f"""<p class="mute">{esc(e['client_code'])} · 현장감사 {esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}
-· 담당자 {esc(e['contact_name'] or '-')} &lt;{esc(e['contact_email'] or '이메일 없음')}&gt;</p>
-<div class="card"><h2 style="margin-top:0">메일 일정</h2>
+        lead_rec = self.store.get_setting(f"leadsheet:{e['id']}")
+        panels = {
+            "mail": f"""<div class="card"><h2 style="margin-top:0">메일 일정</h2>
 <table><tr><th>날짜</th><th>메일</th><th>상태</th><th></th></tr>{''.join(steps)}</table>
 <form method="post" action="/e/{e['id']}/dates" class="row" style="margin-top:10px">
 <label>현장감사 시작일<input type="date" name="fieldwork_start" value="{esc(e['fieldwork_start'])}"></label>
 <label>종료일<input type="date" name="fieldwork_end" value="{esc(e['fieldwork_end'])}"></label>
-<button class="ghost">일정 바꾸기</button></form></div>
-<div class="card"><h2 style="margin-top:0">자료요청 목록</h2><p>{summary}
+<button class="ghost">일정 바꾸기</button></form></div>""",
+            "pbc": f"""<div class="card"><h2 style="margin-top:0">자료요청 목록</h2><p>{summary}
 <a class="btn ghost" href="/e/{e['id']}/pbc.xlsx">엑셀로 받기</a></p>
 <form method="post" action="/e/{e['id']}/items"><table>
 <tr><th>요청번호</th><th>구분</th><th>자료명</th><th>상태</th><th>요청일</th><th>수령일</th><th>비고(메일에 함께 나감)</th></tr>
 {''.join(irows)}</table><p><button>상태 저장</button></p></form>
 <form method="post" action="/e/{e['id']}/items/add" class="row">
 <label>구분<select name="section">{options(sec_opts)}</select></label>
-<label>자료명<input name="title" required size="40"></label><button class="ghost">항목 추가</button></form></div>
-<div class="card"><h2 style="margin-top:0">받은 자료</h2>
+<label>자료명<input name="title" required size="40"></label><button class="ghost">항목 추가</button></form></div>""",
+            "files": f"""<div class="card"><h2 style="margin-top:0">받은 자료</h2>
 <form method="post" action="/e/{e['id']}/upload" enctype="multipart/form-data" class="row">
 <input type="file" name="files" multiple><button>올려서 정리</button></form>
 <p class="mute">메일로 받은 첨부나 대용량 링크로 받은 파일을 여기에 올리거나, 아래 수신함 폴더에 넣고
@@ -505,10 +578,15 @@ class Handler(BaseHTTPRequestHandler):
 <form method="post" action="/e/{e['id']}/sweep"><button class="ghost">수신함 정리</button></form>
 {links_html}
 <table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
-{''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>
-{self._leadsheet_card(e)}
-{self._confirm_card(e, cfg)}
-{self._question_card(e, cfg)}
+{''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>""",
+            "questions": self._question_card(e, cfg),
+            "confirm": self._confirm_card(e, cfg),
+            "lead": self._leadsheet_card(e),
+            "close": f"<div class='card'>{self._adjust_part(e, lead_rec)}</div>",
+        }
+        body = f"""<p class="mute">{esc(e['client_code'])} · 현장감사 {esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}
+· 담당자 {esc(e['contact_name'] or '-')} &lt;{esc(e['contact_email'] or '이메일 없음')}&gt;</p>
+{self._tabs(e, cfg, panels)}
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
 <button class="ghost" style="color:var(--warn);border-color:var(--warn)">감사 건 삭제</button></form>"""
         self._send(page(f"{e['client_name']} {e['fiscal_year']} {e['kind']}", body, *self._flash()))
@@ -518,7 +596,7 @@ class Handler(BaseHTTPRequestHandler):
         if f.get("fieldwork_end", "") < f.get("fieldwork_start", ""):
             raise ValueError("종료일이 시작일보다 빠릅니다.")
         self.store.update_engagement(int(eid), fieldwork_start=f["fieldwork_start"], fieldwork_end=f["fieldwork_end"])
-        self._redirect(f"/e/{eid}", "일정을 바꿨습니다.")
+        self._redirect(f"/e/{eid}#tab-mail", "일정을 바꿨습니다.")
 
     def engagement_delete(self, eid):
         self.store.delete_engagement(int(eid))
@@ -533,14 +611,14 @@ class Handler(BaseHTTPRequestHandler):
             if (st is not None and st != i["status"]) or (note is not None and note != i["note"]):
                 self.store.update_item(i["id"], status=st, note=note, on=today)
                 n += 1
-        self._redirect(f"/e/{eid}", f"{n}개 항목을 저장했습니다.")
+        self._redirect(f"/e/{eid}#tab-pbc", f"{n}개 항목을 저장했습니다.")
 
     def item_add(self, eid):
         f, _ = self._form()
         if not f.get("title", "").strip():
             raise ValueError("자료명을 넣어 주세요.")
         self.store.add_item(int(eid), f.get("section", "기말감사"), f["title"])
-        self._redirect(f"/e/{eid}", "항목을 추가했습니다.")
+        self._redirect(f"/e/{eid}#tab-pbc", "항목을 추가했습니다.")
 
     def upload(self, eid):
         e, cfg = self._eng(eid), self.app.cfg()
@@ -550,19 +628,19 @@ class Handler(BaseHTTPRequestHandler):
         res = [filing.save_file(self.store, e, cfg, name, data=data, received_on=self.app.today(), source="업로드")
                for name, data in files]
         matched = sum(r["matched"] for r in res)
-        self._redirect(f"/e/{eid}", f"{len(res)}개 저장 (항목 연결 {matched}개, 미분류 {len(res) - matched}개)")
+        self._redirect(f"/e/{eid}#tab-files", f"{len(res)}개 저장 (항목 연결 {matched}개, 미분류 {len(res) - matched}개)")
 
     def sweep(self, eid):
         e = self._eng(eid)
         res = filing.sweep_inbox(self.store, e, self.app.cfg(), self.app.today())
         matched = sum(r["matched"] for r in res)
-        self._redirect(f"/e/{eid}", f"수신함에서 {len(res)}개 정리 (항목 연결 {matched}개)")
+        self._redirect(f"/e/{eid}#tab-files", f"수신함에서 {len(res)}개 정리 (항목 연결 {matched}개)")
 
     def refile(self, eid, fid):
         f, _ = self._form()
         item_id = int(f["item_id"]) if f.get("item_id") else None
         dest = filing.refile(self.store, self._eng(eid), self.app.cfg(), int(fid), item_id)
-        self._redirect(f"/e/{eid}", f"옮김: {dest}")
+        self._redirect(f"/e/{eid}#tab-files", f"옮김: {dest}")
 
     def _confirm_card(self, e, cfg) -> str:
         eid = e["id"]
@@ -635,8 +713,7 @@ class Handler(BaseHTTPRequestHandler):
 <p class="mute">더존 합계잔액시산표는 꼭 넣고, 재무상태표·손익계산서(과목별, 전기 금액용)와 거래처원장(잔액)을 함께 고르면
 TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거래처원장은 해당 ○1100 탭에 거래처별 명세로 들어갑니다.
 거래처원장이 어느 계정인지는 잔액으로 찾고, 못 찾으면 파일 이름을 계정명으로 바꿔 올려 주세요 (예: 미지급금.xlsx).
-회사가 준 시산표를 조서에 옮겨 적는 것이며 재무제표를 대신 작성하지 않습니다.</p>{last}
-{self._adjust_part(e, rec)}</div>"""
+회사가 준 시산표를 조서에 옮겨 적는 것이며 재무제표를 대신 작성하지 않습니다.</p>{last}</div>"""
 
     def leadsheet_make(self, eid):
         import tempfile
@@ -1227,7 +1304,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         if self.store.mail_sent(e["id"], kind, d.planned_on):
             raise ValueError("이미 보냄으로 표시한 메일입니다.")
         schedule.record_sent(self.store, d, self.app.today())
-        self._redirect(f"/e/{eid}", f"{d.label} 메일을 보냄으로 기록했습니다.")
+        self._redirect(f"/e/{eid}#tab-mail", f"{d.label} 메일을 보냄으로 기록했습니다.")
 
     def mail_send(self, eid, kind, on):
         e, cfg, items, d = self._draft(eid, kind, on)
@@ -1241,11 +1318,11 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             raise ValueError(f"보내지 못했습니다: {exc}") from exc
         schedule.record_sent(self.store, d, self.app.today())
         self.app.note([f"보냄: {e['client_name']} {d.label} → {d.to}"])
-        self._redirect(f"/e/{eid}", f"{d.label} 메일을 보냈습니다.")
+        self._redirect(f"/e/{eid}#tab-mail", f"{d.label} 메일을 보냈습니다.")
 
     def link_done(self, eid, lid):
         self.store.set_link_done(int(lid))
-        self._redirect(f"/e/{eid}", "링크를 처리함으로 표시했습니다.")
+        self._redirect(f"/e/{eid}#tab-files", "링크를 처리함으로 표시했습니다.")
 
     def mail_fetch(self):
         cfg = self.app.cfg()
