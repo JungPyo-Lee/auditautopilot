@@ -117,3 +117,51 @@ def load_template(path: str | Path) -> dict[str, list[str]]:
     for section in SECTIONS:
         template[section] = [v for v in template[section] if not v.endswith("회계법인")]
     return template
+
+
+def load_list(path: str | Path, default_section: str) -> list[tuple[str, str]]:
+    """새 요청 리스트 엑셀을 읽는다. 반환: [(구분, 자료명)]
+
+    1) 감사준비자료와 같은 4열 양식(기본자료 | 중간감사 | 기말감사 | 실사)
+    2) '자료명'(또는 요청자료·항목) 열이 있는 표. '구분' 열이 있으면 그 구분, 없으면 default_section
+    3) 둘 다 아니면 첫 열의 글자를 자료명으로 본다
+    """
+    from ..workpaper.xlsx_xml import open_workbook
+
+    try:
+        tpl = load_template(path)
+        return [(sec, t) for sec in SECTIONS for t in tpl.get(sec, [])]
+    except ValueError as exc:
+        if ".xls" in str(exc):
+            raise
+    wb = open_workbook(path, read_only=True, data_only=True)
+    try:
+        rows = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    title_col = sec_col = None
+    start = 0
+    for i, r in enumerate(rows[:10]):
+        heads = [str(v or "").replace(" ", "") for v in r]
+        t = next((j for j, h in enumerate(heads) if h in ("자료명", "요청자료", "요청자료명", "항목", "자료")), None)
+        if t is not None:
+            title_col, start = t, i + 1
+            sec_col = next((j for j, h in enumerate(heads) if h in ("구분", "단계", "시기")), None)
+            break
+    out: list[tuple[str, str]] = []
+    for r in rows[start:]:
+        if title_col is None:
+            v = next((x for x in r if isinstance(x, str) and x.strip()), None)
+        else:
+            v = r[title_col] if title_col < len(r) else None
+        title = str(v or "").strip()
+        if not title or title.endswith("회계법인"):
+            continue
+        sec = default_section
+        if sec_col is not None and sec_col < len(r):
+            sec = _section_of(str(r[sec_col] or "")) or default_section
+        if (sec, title) not in out:
+            out.append((sec, title))
+    if not out:
+        raise ValueError("요청 리스트에서 자료명을 찾지 못했습니다. '자료명' 열이 있는 표나 감사준비자료 4열 양식으로 올려 주세요.")
+    return out

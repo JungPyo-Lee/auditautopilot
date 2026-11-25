@@ -62,7 +62,7 @@ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.steps a.ok{background
 .tabs a{padding:7px 14px;background:#e4e7ec;border:1px solid #c9ced6;border-bottom:none;border-radius:6px 6px 0 0;
 color:var(--ink);font-size:13px;text-decoration:none}.tabs a.on{background:#fff;font-weight:600;border-color:#9aa3b2;
 position:relative;top:2px;border-bottom:2px solid #fff}.tabs a i{font-style:normal;margin-right:4px}
-.js .tab{display:none}.js .tab.on{display:block}.tab{padding-top:14px}td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
+.stepctl{margin-bottom:10px;align-items:center}.js .tab{display:none}.js .tab.on{display:block}.tab{padding-top:14px}td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
 """
 
 
@@ -242,6 +242,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/notes-request\.xlsx", "notes_request"),
         ("GET", r"/e/(\d+)/report\.docx", "report_docx"),
         ("POST", r"/e/(\d+)/notes-filled", "notes_filled"),
+        ("POST", r"/e/(\d+)/step/(\w+)", "step_set"),
+        ("POST", r"/e/(\d+)/items/import", "items_import"),
         ("GET", r"/e/(\d+)/fs\.docx", "fs_docx"),
         ("POST", r"/e/(\d+)/questions", "question_add"),
         ("POST", r"/e/(\d+)/questions/act", "question_act"),
@@ -290,9 +292,11 @@ class Handler(BaseHTTPRequestHandler):
                     back = self.headers.get("Referer") or "/"
                     if method == "POST":
                         to = urllib.parse.urlsplit(back).path or "/"
-                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet|adjust|notes-filled)", self.path)
+                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet|adjust|notes-filled|items|upload|sweep|dates)",
+                                       self.path)
                         if sec and to.startswith("/e/"):        # 오류가 난 카드로 돌아간다
-                            to += "#" + {"notes-filled": "closing"}.get(sec.group(1), sec.group(1))
+                            to += "#" + {"notes-filled": "closing", "items": "tab-pbc", "upload": "tab-files",
+                                         "sweep": "tab-files", "dates": "tab-mail"}.get(sec.group(1), sec.group(1))
                         self._redirect(to, str(exc), error=True)
                     else:
                         self._send(page("오류", f"<p>{esc(exc)}</p>"), status=HTTPStatus.BAD_REQUEST)
@@ -310,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
         return e
 
     # ── 진행 단계 ─────────────────────────────────────
-    STEPS = (("mail", "메일 일정"), ("pbc", "자료요청"), ("files", "받은자료"), ("questions", "질문서"),
+    STEPS = (("pbc", "자료요청"), ("mail", "메일 일정"), ("files", "받은자료"), ("questions", "질문서"),
              ("confirm", "채권채무조회"), ("lead", "리드시트"), ("close", "수정분개·재무제표"))
 
     def progress(self, e, cfg) -> list[tuple[str, str, bool, str]]:
@@ -329,21 +333,47 @@ class Handler(BaseHTTPRequestHandler):
         lead = self.store.get_setting(f"leadsheet:{eid}")
         adj = self.store.get_setting(f"adjust:{eid}")
         nf = self.store.get_setting(f"notes_filled:{eid}")
-        steps = [
-            (sent, "자료요청 메일 보냄" if sent else "자료요청 메일을 아직 안 보냄"),
-            (bool(req) and not out_items, f"미제출 {len(out_items)}건" if out_items else
-             ("요청 항목 없음" if not req else "모두 받음")),
-            (bool(files) and not unfiled, "받은 파일 없음" if not files else
-             (f"항목 미연결 {len(unfiled)}개" if unfiled else f"{len(files)}개 모두 항목에 연결")),
-            (bool(qs) and not open_q, "질문서 없음" if not qs else
-             (f"종결 안 된 질문 {len(open_q)}건" if open_q else "모두 종결")),
-            (bool(a and a["ok"]), "회신현황 없음" if a is None else
-             ("기준 충족" if a["ok"] else " / ".join(a["reasons"]))),
-            (bool(lead), "조서 채움" if lead else "조서를 아직 안 채움"),
-            (bool(adj and nf), "수정분개 반영·주석 자료 받음" if adj and nf else
-             ("주석 자료를 아직 안 받음" if adj else "수정분개를 아직 반영 안 함")),
-        ]
-        return [(k, lbl, ok, hint) for (k, lbl), (ok, hint) in zip(self.STEPS, steps)]
+        auto = {
+            "mail": (sent, "자료요청 메일 보냄" if sent else "자료요청 메일을 아직 안 보냄"),
+            "pbc": (bool(req) and not out_items, f"미제출 {len(out_items)}건" if out_items else
+                    ("요청 항목 없음" if not req else "모두 받음")),
+            "files": (bool(files) and not unfiled, "받은 파일 없음" if not files else
+                      (f"항목 미연결 {len(unfiled)}개" if unfiled else f"{len(files)}개 모두 항목에 연결")),
+            "questions": (bool(qs) and not open_q, "질문서 없음" if not qs else
+                          (f"종결 안 된 질문 {len(open_q)}건" if open_q else "모두 종결")),
+            "confirm": (bool(a and a["ok"]), "회신현황 없음" if a is None else
+                        ("기준 충족" if a["ok"] else " / ".join(a["reasons"]))),
+            "lead": (bool(lead), "조서 채움" if lead else "조서를 아직 안 채움"),
+            "close": (bool(adj and nf), "수정분개 반영·주석 자료 받음" if adj and nf else
+                      ("주석 자료를 아직 안 받음" if adj else "수정분개를 아직 반영 안 함")),
+        }
+        manual = self.store.get_setting(f"steps:{eid}") or {}
+        out = []
+        for k, lbl in self.STEPS:
+            ok, hint = auto[k]
+            if k in manual:
+                ok = bool(manual[k])
+                hint = ("직접 완료 처리" if ok else "직접 미완료 처리") + f" (자동 판정: {hint})"
+            out.append((k, lbl, ok, hint))
+        return out
+
+    def step_set(self, eid, key):
+        e = self._eng(eid)
+        names = dict(self.STEPS)
+        if key not in names:
+            raise ValueError("없는 단계입니다.")
+        f, _ = self._form()
+        manual = self.store.get_setting(f"steps:{e['id']}") or {}
+        v = f.get("v")
+        if v == "done":
+            manual[key] = True
+        elif v == "undo":
+            manual[key] = False
+        else:
+            manual.pop(key, None)
+        self.store.set_setting(f"steps:{e['id']}", manual)
+        msg = {"done": "완료로 표시했습니다", "undo": "완료를 해제했습니다"}.get(v, "자동 판정으로 돌렸습니다")
+        self._redirect(f"/e/{eid}#tab-{key}", f"{names[key]}: {msg}")
 
     def _tabs(self, e, cfg, panels: dict[str, str]) -> str:
         prog = self.progress(e, cfg)
@@ -352,7 +382,17 @@ class Handler(BaseHTTPRequestHandler):
                       f"{'✓' if ok else '✗'} {esc(lbl)}</a>" for k, lbl, ok, hint in prog)
         tabs = "".join(f"<a href='#tab-{k}' data-tab='{k}'><i style='color:{'#1d8a4e' if ok else '#c2362b'}'>●</i>"
                        f"{esc(lbl)}</a>" for k, lbl, ok, _ in prog)
-        body = "".join(f"<section class='tab' id='tab-{k}'>{panels[k]}</section>" for k, *_ in prog)
+        manual = self.store.get_setting(f"steps:{e['id']}") or {}
+
+        def ctl(k, lbl, ok, hint):
+            act = (f"<button name='v' value='undo' class='ghost'>완료 해제</button>" if ok
+                   else f"<button name='v' value='done'>완료 처리</button>")
+            reset = (f"<button name='v' value='auto' class='ghost'>자동 판정으로 돌아가기</button>" if k in manual else "")
+            return (f"<form method='post' action='/e/{e['id']}/step/{k}' class='row stepctl'>"
+                    f"<span class='{'badge-ok' if ok else 'warn'}'><b>{'✓ 완료' if ok else '✗ 미완료'}</b></span>"
+                    f"<span class='mute'>{esc(hint)}</span>{act}{reset}</form>")
+        body = "".join(f"<section class='tab' id='tab-{k}'>{ctl(k, lbl, ok, hint)}{panels[k]}</section>"
+                       for k, lbl, ok, hint in prog)
         return f"""<div class="steps">{bar}</div><p class="mute" style="margin:0">진행 {done}/{len(prog)} 단계 완료 ·
 막대에 마우스를 올리면 남은 일이 보입니다.</p>
 <nav class="tabs">{tabs}</nav>{body}
@@ -362,7 +402,7 @@ function show(k){{secs.forEach(function(s){{s.classList.toggle('on',s.id==='tab-
 tabs.forEach(function(a){{a.classList.toggle('on',a.dataset.tab===k)}});try{{localStorage.setItem('tab{e['id']}',k)}}catch(x){{}}}}
 function fromHash(){{var h=location.hash.slice(1);if(!h)return null;if(h.indexOf('tab-')===0)return h.slice(4);
 var el=document.getElementById(h);var s=el&&el.closest('section.tab');return s?s.id.slice(4):null}}
-var k=fromHash();if(!k){{try{{k=localStorage.getItem('tab{e['id']}')}}catch(x){{}}}}show(k||'mail');
+var k=fromHash();if(!k){{try{{k=localStorage.getItem('tab{e['id']}')}}catch(x){{}}}}show(k||'pbc');
 var el=location.hash&&document.getElementById(location.hash.slice(1));if(el&&el.tagName!=='SECTION')setTimeout(function(){{el.scrollIntoView()}},0);
 window.addEventListener('hashchange',function(){{var k=fromHash();if(k)show(k)}});
 document.querySelectorAll('.steps a,.tabs a').forEach(function(a){{a.addEventListener('click',function(ev){{
@@ -568,17 +608,31 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
 {''.join(irows)}</table><p><button>상태 저장</button></p></form>
 <form method="post" action="/e/{e['id']}/items/add" class="row">
 <label>구분<select name="section">{options(sec_opts)}</select></label>
-<label>자료명<input name="title" required size="40"></label><button class="ghost">항목 추가</button></form></div>""",
+<label>자료명<input name="title" required size="40"></label><button class="ghost">항목 추가</button></form>
+<h2>새 요청 리스트 올리기</h2>
+<form method="post" action="/e/{e['id']}/items/import" enctype="multipart/form-data" class="row">
+<label>요청 리스트 엑셀<input type="file" name="list" accept=".xlsx" required></label>
+<label>구분이 없을 때<select name="section">{options(sec_opts, e['kind'])}</select></label>
+<label>반영 방법<select name="mode"><option value="add">기본 목록에 더하기 (같은 자료명은 건너뜀)</option>
+<option value="replace">아직 요청 안 한 항목을 이 리스트로 바꾸기</option></select></label>
+<button class="ghost">리스트 반영</button></form>
+<p class="mute">감사준비자료 4열 양식(기본자료 | 중간감사 | 기말감사 | 실사), '자료명'(+'구분') 열이 있는 표, 또는 첫 열에 자료명만 적은 목록을 받습니다.
+기본 양식(업종 템플릿)은 그대로 두고 이 감사 건에만 반영합니다. '바꾸기'는 미요청 상태이고 받은 파일이 없는 항목만 지웁니다.</p></div>""",
             "files": f"""<div class="card"><h2 style="margin-top:0">받은 자료</h2>
-<form method="post" action="/e/{e['id']}/upload" enctype="multipart/form-data" class="row">
-<input type="file" name="files" multiple><button>올려서 정리</button></form>
-<p class="mute">메일로 받은 첨부나 대용량 링크로 받은 파일을 여기에 올리거나, 아래 수신함 폴더에 넣고
-[수신함 정리]를 누르면 폴더 규칙대로 저장됩니다. 파일 이름에 요청번호(예: 중간-03)나 자료명이 있으면 해당 항목이 '수령'으로 바뀝니다.<br>
-수신함: <code>{esc(inbox)}</code></p>
-<form method="post" action="/e/{e['id']}/sweep"><button class="ghost">수신함 정리</button></form>
+<p>회사가 메일로 보낸 첨부는 프로그램이 켜져 있는 동안 {cfg['check_minutes']}분마다 메일함을 읽어 <b>저절로 저장</b>합니다
+(폴더 규칙대로 저장하고, 파일 이름에 요청번호나 자료명이 있으면 그 항목을 '수령'으로 바꿈). 따로 올릴 필요가 없습니다.</p>
+<form method="post" action="/mail/fetch" class="row"><input type="hidden" name="back" value="/e/{e['id']}#tab-files">
+<button class="ghost">받은 메일 지금 확인</button>
+<span class="mute">{esc(', '.join(a['user'] for a in cfg['mail_accounts'])) or '메일 계정이 없습니다. 설정 > 메일 계정에서 연결하세요.'}</span></form>
 {links_html}
-<table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
-{''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>""",
+<h2>받은 파일</h2>
+<table><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
+{''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table>
+<details style="margin-top:12px"><summary>메일이 아닌 경로(USB·대용량 링크·메신저 등)로 받은 파일 넣기</summary>
+<form method="post" action="/e/{e['id']}/upload" enctype="multipart/form-data" class="row" style="margin-top:8px">
+<input type="file" name="files" multiple><button class="ghost">올려서 정리</button></form>
+<p class="mute">또는 아래 수신함 폴더에 넣고 [수신함 정리]를 누르면 같은 규칙으로 저장됩니다.<br>수신함: <code>{esc(inbox)}</code></p>
+<form method="post" action="/e/{e['id']}/sweep"><button class="ghost">수신함 정리</button></form></details></div>""",
             "questions": self._question_card(e, cfg),
             "confirm": self._confirm_card(e, cfg),
             "lead": self._leadsheet_card(e),
@@ -619,6 +673,35 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
             raise ValueError("자료명을 넣어 주세요.")
         self.store.add_item(int(eid), f.get("section", "기말감사"), f["title"])
         self._redirect(f"/e/{eid}#tab-pbc", "항목을 추가했습니다.")
+
+    def items_import(self, eid):
+        import tempfile
+
+        e = self._eng(eid)
+        f, files = self._form()
+        got = [(n, d) for n, d in files if d]
+        if not got:
+            raise ValueError("요청 리스트 엑셀을 골라 주세요.")
+        name, data = got[0]
+        if not name.lower().endswith(".xlsx"):
+            raise ValueError(f"{name}: .xlsx 파일만 받습니다. (.xls는 엑셀에서 .xlsx로 다른 이름으로 저장)")
+        section = f.get("section") if f.get("section") in pbc.SECTIONS else "기말감사"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            p = Path(tmp) / "list.xlsx"
+            p.write_bytes(data)
+            rows = pbc.load_list(p, section)
+        removed = self.store.remove_unrequested_items(e["id"]) if f.get("mode") == "replace" else 0
+        have = {i["title"].replace(" ", "") for i in self.store.items(e["id"])}
+        added = 0
+        for sec, title in rows:
+            if title.replace(" ", "") in have:
+                continue
+            self.store.add_item(e["id"], sec, title)
+            have.add(title.replace(" ", ""))
+            added += 1
+        msg = f"요청 리스트 반영: {added}개 추가" + (f", 미요청 항목 {removed}개 지움" if removed else "") + \
+            (f", 이미 있는 {len(rows) - added}개 건너뜀" if len(rows) - added else "")
+        self._redirect(f"/e/{eid}#tab-pbc", msg)
 
     def upload(self, eid):
         e, cfg = self._eng(eid), self.app.cfg()
@@ -964,12 +1047,24 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
                 amt = "" if q["amount"] is None else f"{q['amount']:,.0f}"
             who = f"<br><span class='mute'>{esc(q['approved_by'] or '')} {esc(q['approved_on'] or '')}</span>" if q["approved_on"] else ""
             ans = esc(q["answer"]) if q["answer"] else "<span class='mute'>-</span>"
-            rows.append(f"<tr><td><input type='checkbox' name='ids' value='{q['id']}' form='qact'></td><td>{esc(q['code'])}</td>"
+            cat = questions.category(q)
+            rows.append(f"<tr><td><input type='checkbox' name='ids' value='{q['id']}' form='qact' data-cat='{esc(cat)}'></td>"
+                        f"<td>{esc(q['code'])}</td><td><span class='pill' style='background:#6b7a90'>{esc(cat)}</span></td>"
                         f"<td>{acc}</td><td>{qcell}</td><td style='text-align:right'>{amt}</td>"
                         f"<td>{pill(q['status'])}{who}</td><td>{ans}</td></tr>")
-        table = ("<table><tr><th></th><th>번호</th><th>계정</th><th>질문</th><th>금액</th><th>상태</th><th>답변</th></tr>"
+        table = ("<table><tr><th></th><th>번호</th><th>구분</th><th>계정</th><th>질문</th><th>금액</th><th>상태</th><th>답변</th></tr>"
                  + "".join(rows) + "</table>") if rows else "<p class='mute'>아직 질문이 없습니다.</p>"
         summary = " · ".join(f"{s} {n}" for s, n in counts.items() if n)
+        cats: dict[str, int] = {}
+        for q in qs:
+            cats[questions.category(q)] = cats.get(questions.category(q), 0) + 1
+        order = [n for _, n in questions.CATEGORIES] + [questions.OTHER]
+        cat_btns = "".join(
+            f"<button type='button' class='ghost' title='이 구분의 질문만 고릅니다' onclick=\"document.querySelectorAll("
+            f"'input[name=ids][form=qact]').forEach(c=>c.checked=c.dataset.cat==='{esc(c)}')\">{esc(c)} {cats[c]}</button>"
+            for c in order if c in cats)
+        if cat_btns:
+            cat_btns = f"<span class='mute' style='margin-left:8px'>구분별 선택</span>{cat_btns}<span style='width:12px'></span>"
         n_ok = counts["승인"]
         mail_btn = (f"<a class='btn' href='/e/{eid}/questions/mail'>승인한 질문 {n_ok}건 메일 미리보기</a>" if n_ok
                     else "<span class='mute'>승인한 질문이 있으면 메일로 보낼 수 있습니다.</span>")
@@ -978,6 +1073,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 <form id="qact" method="post" action="/e/{eid}/questions/act" class="row">
 <button type="button" class="ghost" onclick="document.querySelectorAll('input[name=ids][form=qact]').forEach(c=>c.checked=true)">모두 선택</button>
 <button type="button" class="ghost" onclick="document.querySelectorAll('input[name=ids][form=qact]').forEach(c=>c.checked=false)">모두 해제</button>
+{cat_btns}
 <button name="action" value="submit" class="ghost">승인 요청</button>
 <button name="action" value="approve">승인</button>
 <button name="action" value="revert" class="ghost">작성으로 되돌리기</button>
@@ -1326,6 +1422,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 
     def mail_fetch(self):
         cfg = self.app.cfg()
+        f, _ = self._form()
         try:
             r = mailbox.fetch(self.store, cfg, self.app.today())
         except (OSError, imaplib_error()) as exc:
@@ -1336,7 +1433,10 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         if r.errors:
             msg += " / 실패: " + "; ".join(r.errors)
         self.app.note([msg])
-        self._redirect("/", msg, error=bool(r.errors) and not r.checked)
+        back = f.get("back") or "/"
+        if not back.startswith("/") or back.startswith("//"):
+            back = "/"
+        self._redirect(back, msg, error=bool(r.errors) and not r.checked)
 
     def mail_account_save(self):
         f, _ = self._form()
