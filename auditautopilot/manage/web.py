@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, filing, mailer, pbc, schedule
+from . import config, filing, mailbox, mailer, pbc, schedule
 from .db import KINDS, STATUSES, Store
 
 MAX_UPLOAD = 300 * 1024 * 1024
@@ -79,6 +79,14 @@ class App:
         self.store = store
         self.today = today
         self.lock = threading.Lock()
+        self.log: list[str] = []   # 백그라운드 메일 확인·발송 기록 (최근 것부터)
+
+    def note(self, lines) -> None:
+        from datetime import datetime
+        stamp = datetime.now().strftime("%m-%d %H:%M")
+        for line in lines:
+            self.log.insert(0, f"{stamp} {line}")
+        del self.log[50:]
 
     def cfg(self) -> dict:
         return config.load(self.store)
@@ -184,8 +192,13 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)", "mail_preview"),
         ("GET", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)\.eml", "mail_eml"),
         ("POST", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)/sent", "mail_sent"),
+        ("POST", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)/send", "mail_send"),
+        ("POST", r"/e/(\d+)/links/(\d+)/done", "link_done"),
+        ("POST", r"/mail/fetch", "mail_fetch"),
         ("GET", r"/settings", "settings"),
         ("POST", r"/settings", "settings_save"),
+        ("POST", r"/settings/mail", "mail_account_save"),
+        ("POST", r"/settings/mail-test", "mail_test"),
     ]
 
     def _dispatch(self, method: str):
@@ -250,6 +263,15 @@ class Handler(BaseHTTPRequestHandler):
                     + "".join(erows) + "</table>") if erows else (
             '<p class="mute">등록된 감사가 없습니다. <a href="/clients">회사</a>를 먼저 등록하고 '
             '<a href="/engagements/new">감사를 등록</a>하세요.</p>')
+        if cfg["mail_user"]:
+            auto = "켜짐" if cfg["auto_send"] else "꺼짐(미리보기에서 직접 보내기)"
+            mail_html += (f"<form method='post' action='/mail/fetch' class='row' style='margin-top:10px'>"
+                          f"<button class='ghost'>받은 메일 지금 확인</button>"
+                          f"<span class='mute'>{esc(cfg['mail_user'])} · {cfg['check_minutes']}분마다 확인 · 자동 발송 {auto}</span></form>")
+        else:
+            mail_html += "<p class='mute'><a href='/settings#mail'>메일 계정을 연결</a>하면 여기서 바로 보내고, 받은 첨부를 자동으로 저장합니다.</p>"
+        if self.app.log:
+            mail_html += "<h2>최근 메일 작업</h2><pre>" + esc("\n".join(self.app.log[:15])) + "</pre>"
         body = (f"{warn}<div class='card'><h2 style='margin-top:0'>오늘({today.isoformat()}) 보낼 메일</h2>{mail_html}</div>"
                 f"<div class='card'><h2 style='margin-top:0'>감사 진행 현황</h2>{eng_html}</div>")
         self._send(page("현황", body, *self._flash()))
@@ -370,6 +392,14 @@ class Handler(BaseHTTPRequestHandler):
                 f"<button class='ghost'>옮기기</button></form></td></tr>")
         sec_opts = [(s, s) for s in pbc.SECTIONS]
         inbox = filing.inbox_dir(e, cfg)
+        lrows = "".join(
+            f"<tr><td>{esc(l['received_on'])}</td><td>{esc(l['sender'])}<br><span class='mute'>{esc(l['subject'])}</span></td>"
+            f"<td style='word-break:break-all'><a href='{esc(l['url'])}' target='_blank' rel='noopener noreferrer'>{esc(l['url'])}</a></td>"
+            f"<td><form method='post' action='/e/{e['id']}/links/{l['id']}/done'><button class='ghost'>받아서 수신함에 넣음</button></form></td></tr>"
+            for l in self.store.links(e["id"]))
+        links_html = (f"<h2>대용량 링크 (직접 내려받기 필요)</h2><p class='mute'>링크에서 내려받아 위 수신함 폴더에 넣고 "
+                      f"[수신함 정리]를 누르세요.</p><table><tr><th>받은 날</th><th>보낸 사람·제목</th><th>링크</th><th></th></tr>"
+                      f"{lrows}</table>") if lrows else ""
         body = f"""<p class="mute">{esc(e['client_code'])} · 현장감사 {esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}
 · 담당자 {esc(e['contact_name'] or '-')} &lt;{esc(e['contact_email'] or '이메일 없음')}&gt;</p>
 <div class="card"><h2 style="margin-top:0">메일 일정</h2>
@@ -393,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
 [수신함 정리]를 누르면 폴더 규칙대로 저장됩니다. 파일 이름에 요청번호(예: 중간-03)나 자료명이 있으면 해당 항목이 '수령'으로 바뀝니다.<br>
 수신함: <code>{esc(inbox)}</code></p>
 <form method="post" action="/e/{e['id']}/sweep"><button class="ghost">수신함 정리</button></form>
+{links_html}
 <table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
 {''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
@@ -473,12 +504,16 @@ class Handler(BaseHTTPRequestHandler):
         base = f"/e/{e['id']}/mail/{kind}/{on}"
         attach = "첨부: 자료요청목록.xlsx" if kind == "request" else ""
         after = "요청 항목이 '요청' 상태로 바뀌고 " if kind == "request" else ""
+        send_btn = (f'<form method="post" action="{base}/send" style="display:inline" '
+                    f'onsubmit="return confirm({esc(json.dumps(d.to + " 에게 지금 보냅니다.", ensure_ascii=False))})">'
+                    f'<button>지금 보내기</button></form> '
+                    if cfg.get("mail_user") and d.to else "")
         actions = ('<p class="mute">이미 보낸 메일입니다.</p>' if sent else
-                   f"""<p><a class="btn" href="{base}.eml">아웃룩으로 열기 (.eml)</a>
+                   f"""<p>{send_btn}<a class="btn ghost" href="{base}.eml">아웃룩으로 열기 (.eml)</a>
 <form method="post" action="{base}/sent" style="display:inline"><button class="ghost">보냄으로 표시</button></form></p>
 <p class="mute">내려받은 .eml 을 열면 아웃룩에 보낼 수 있는 새 메일로 열립니다. 보낸 뒤 [보냄으로 표시]를 누르면
 {after}같은 메일이 다시 뜨지 않습니다.
-메일 계정 연결은 사용하는 메일이 정해지면 붙입니다.</p>""")
+</p>""")
         body = f"""<div class="card"><p><b>받는 사람</b> {esc(d.to) or '<span class=warn>회사 담당자 이메일이 없습니다</span>'}
 {f' · <b>참조</b> {esc(d.cc)}' if d.cc else ''}</p><p><b>제목</b> {esc(d.subject)}</p><pre>{esc(d.body)}</pre>
 <p class="mute">{attach}</p>{actions}</div><p><a href="/e/{e['id']}">← 감사 건으로</a></p>"""
@@ -498,6 +533,64 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("이미 보냄으로 표시한 메일입니다.")
         schedule.record_sent(self.store, d, self.app.today())
         self._redirect(f"/e/{eid}", f"{d.label} 메일을 보냄으로 기록했습니다.")
+
+    def mail_send(self, eid, kind, on):
+        e, cfg, items, d = self._draft(eid, kind, on)
+        if self.store.mail_sent(e["id"], kind, d.planned_on):
+            raise ValueError("이미 보낸 메일입니다.")
+        if not d.to:
+            raise ValueError("회사 담당자 이메일이 없습니다.")
+        try:
+            mailbox.send(cfg, mailer.message_for(self.store, cfg, e, d))
+        except (OSError, mailbox.smtplib.SMTPException) as exc:
+            raise ValueError(f"보내지 못했습니다: {exc}") from exc
+        schedule.record_sent(self.store, d, self.app.today())
+        self.app.note([f"보냄: {e['client_name']} {d.label} → {d.to}"])
+        self._redirect(f"/e/{eid}", f"{d.label} 메일을 보냈습니다.")
+
+    def link_done(self, eid, lid):
+        self.store.set_link_done(int(lid))
+        self._redirect(f"/e/{eid}", "링크를 처리함으로 표시했습니다.")
+
+    def mail_fetch(self):
+        cfg = self.app.cfg()
+        try:
+            r = mailbox.fetch(self.store, cfg, self.app.today())
+        except (OSError, imaplib_error()) as exc:
+            raise ValueError(f"메일을 확인하지 못했습니다: {exc}") from exc
+        matched = sum(1 for f in r.saved if f["matched"])
+        msg = (f"새 메일 {r.checked}통 확인: 첨부 {len(r.saved)}개 저장(항목 연결 {matched}개), "
+               f"대용량 링크 {r.links}개, 감사와 관계없는 메일 {r.skipped}통")
+        self.app.note([msg])
+        self._redirect("/", msg)
+
+    def mail_account_save(self):
+        f, _ = self._form()
+        provider = f.get("mail_provider", "직접 입력")
+        new = {"mail_provider": provider, "mail_user": f.get("mail_user", "").strip()}
+        preset = mailbox.PRESETS.get(provider, {})
+        for k in ("imap_host", "smtp_host"):
+            new[k] = (f.get(k) or preset.get(k, "")).strip()
+        for k in ("imap_port", "smtp_port", "send_hour", "check_minutes"):
+            v = f.get(k) or preset.get(k)
+            if v not in (None, ""):
+                new[k] = int(v)
+        if not 0 <= new.get("send_hour", 9) <= 23 or new.get("check_minutes", 10) < 1:
+            raise ValueError("발송 시각은 0~23시, 확인 주기는 1분 이상으로 넣어 주세요.")
+        new["auto_send"] = f.get("auto_send") == "1"
+        for k, v in new.items():
+            self.store.set_setting(k, v)
+        note = "메일 계정을 저장했습니다."
+        if f.get("password"):
+            note += " " + mailbox.set_password(new["mail_user"], f["password"], remember=f.get("remember") == "1")
+        self._redirect("/settings#mail", note)
+
+    def mail_test(self):
+        try:
+            msg = mailbox.test_connection(self.app.cfg())
+        except (OSError, mailbox.smtplib.SMTPException, imaplib_error()) as exc:
+            raise ValueError(f"연결 실패: {exc}") from exc
+        self._redirect("/settings#mail", msg)
 
     # ── 설정 ──────────────────────────────────────────
     def settings(self):
@@ -539,8 +632,41 @@ class Handler(BaseHTTPRequestHandler):
 {{현장감사 시작일}} {{현장감사 종료일}} {{제출기한}} {{미제출 건수}} {{D-n}} {{감사코드}} {{요청 자료 표}} {{미제출 자료 표}}</p>
 {inp('request_subject', '최초 요청 제목', style='width:100%')}{area('request_body', '최초 요청 본문', 12)}
 {inp('reminder_subject', '독촉 제목', style='width:100%')}{area('reminder_body', '독촉 본문', 9)}{area('dday_body', '당일 본문', 7)}
-</div><p><button>설정 저장</button></p></form>"""
+</div><p><button>설정 저장</button></p></form>{self._mail_settings(cfg)}"""
         self._send(page("설정", body, *self._flash()))
+
+    def _mail_settings(self, cfg) -> str:
+        has_pw = bool(cfg["mail_user"]) and bool(mailbox.get_password(cfg["mail_user"]))
+        provs = [(k, k) for k in mailbox.PRESETS] + [("직접 입력", "직접 입력")]
+        presets = json.dumps(mailbox.PRESETS, ensure_ascii=False)
+
+        def v(k):
+            return esc(cfg[k])
+        return f"""<form method="post" action="/settings/mail" id="mail"><div class="card">
+<h2 style="margin-top:0">메일 계정</h2>
+<p class="mute">IMAP(받기)·SMTP(보내기)를 쓰는 메일이면 됩니다. 대부분 일반 비밀번호 대신 메일 설정에서 만든
+'앱 비밀번호'를 넣어야 합니다. 비밀번호는 데이터베이스에 저장하지 않습니다.</p>
+<div class="row">
+<label>메일<select name="mail_provider" id="prov">{options(provs, cfg['mail_provider'])}</select></label>
+<label>메일 주소<input name="mail_user" value="{v('mail_user')}" type="email"></label>
+<label>비밀번호 {'(저장됨, 바꿀 때만 입력)' if has_pw else ''}<input name="password" type="password" autocomplete="new-password"></label>
+<label style="flex-direction:row;gap:4px"><input type="checkbox" name="remember" value="1">윈도우 자격 증명 관리자에 저장</label>
+</div><div class="row" style="margin-top:8px">
+<label>받기 서버<input name="imap_host" id="imap_host" value="{v('imap_host')}"></label>
+<label>포트<input name="imap_port" id="imap_port" value="{v('imap_port')}" size="4"></label>
+<label>보내기 서버<input name="smtp_host" id="smtp_host" value="{v('smtp_host')}"></label>
+<label>포트<input name="smtp_port" id="smtp_port" value="{v('smtp_port')}" size="4"></label>
+</div><div class="row" style="margin-top:8px">
+<label>받은 메일 확인 (분마다)<input name="check_minutes" value="{v('check_minutes')}" size="3"></label>
+<label style="flex-direction:row;gap:4px"><input type="checkbox" name="auto_send" value="1" {'checked' if cfg['auto_send'] else ''}>
+요청·독촉 메일 자동 발송</label>
+<label>발송 시각 (시)<input name="send_hour" value="{v('send_hour')}" size="3"></label>
+</div><p class="mute">자동 발송을 켜면 매일 발송 시각 이후 '오늘 보낼 메일'을 회사 담당자에게 보냅니다.
+처음에는 끈 채로 미리보기에서 [지금 보내기]로 몇 번 보내 보고 켜기를 권합니다. 프로그램이 켜져 있을 때만 동작합니다.</p>
+<p><button>메일 계정 저장</button></p></div></form>
+<form method="post" action="/settings/mail-test"><button class="ghost">연결 시험</button></form>
+<script>const P={presets};document.getElementById('prov').onchange=function(){{const p=P[this.value];if(!p)return;
+for(const k in p)document.getElementById(k).value=p[k];}};</script>"""
 
     def settings_save(self):
         f, _ = self._form()
@@ -569,6 +695,10 @@ class Handler(BaseHTTPRequestHandler):
         self._redirect("/settings", "설정을 저장했습니다.")
 
 
+def imaplib_error():
+    return mailbox.imaplib.IMAP4.error
+
+
 def make_server(store: Store, host: str = "127.0.0.1", port: int = 8765, today=date.today) -> ThreadingHTTPServer:
     app = App(store, today)
     hosts = {f"{h}:{port}" for h in ("127.0.0.1", "localhost")}
@@ -586,9 +716,35 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8765, open_browser:
     print(f"데이터베이스: {Path(db_path).resolve()}")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    start_background(srv)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         srv.server_close()
+
+
+def start_background(srv) -> threading.Thread:
+    """받은 메일 확인과 자동 발송을 주기적으로 돈다."""
+    import time
+    from datetime import datetime
+
+    app = srv.RequestHandlerClass.app
+    state: dict = {}
+
+    def loop():
+        while True:
+            cfg = app.cfg()
+            with app.lock:
+                lines = mailbox.run_cycle(app.store, cfg, datetime.now(),
+                                          lambda e, d: mailer.message_for(app.store, cfg, e, d), state)
+            if lines:
+                app.note(lines)
+                for line in lines:
+                    print(line)
+            time.sleep(max(1, int(cfg.get("check_minutes") or 10)) * 60)
+
+    t = threading.Thread(target=loop, daemon=True, name="mail")
+    t.start()
+    return t

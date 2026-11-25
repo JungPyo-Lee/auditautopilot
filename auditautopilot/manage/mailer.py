@@ -50,3 +50,12 @@ def eml_bytes(msg: EmailMessage) -> bytes:
     buf = io.BytesIO()
     buf.write(msg.as_bytes())
     return buf.getvalue()
+
+
+def message_for(store, cfg: dict, engagement: dict, draft) -> EmailMessage:
+    """오늘 보낼 메일 초안을 메일로 만든다. 최초 요청이면 요청 목록 엑셀을 붙인다."""
+    by_code = {i["code"]: i for i in store.items(engagement["id"])}
+    items = [by_code[c] for c in draft.item_codes if c in by_code]
+    name = (f"{engagement['client_name']}_{engagement['kind']}_자료요청목록.xlsx"
+            if draft.kind == "request" else None)
+    return build_message(draft, cfg.get("sender_email") or cfg.get("mail_user") or "", items, name)

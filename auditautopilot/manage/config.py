@@ -61,6 +61,16 @@ DEFAULTS = {
     "reminder_subject": REMINDER_SUBJECT,
     "reminder_body": REMINDER_BODY,
     "dday_body": DDAY_BODY,
+    # 메일 계정 (비밀번호는 여기에 저장하지 않는다)
+    "mail_provider": "Gmail",
+    "mail_user": "",
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 465,
+    "auto_send": False,       # 켜면 매일 send_hour 이후 오늘 메일을 자동 발송
+    "send_hour": 9,
+    "check_minutes": 10,      # 받은 메일 확인 주기
 }
 
 
