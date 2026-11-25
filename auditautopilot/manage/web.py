@@ -78,6 +78,16 @@ def options(values, selected=None) -> str:
                    for v, lbl in values)
 
 
+def stamped(filename: str, now=None) -> str:
+    """내려받는 엑셀·워드 파일 이름 끝에 만든 시각을 붙인다.
+    엑셀은 이름이 같은 파일을 동시에 열지 못하고, 받은 폴더에 같은 이름이 있으면 덮어쓰기에서 막히기 때문."""
+    from datetime import datetime
+
+    p = Path(filename)
+    if p.suffix.lower() not in (".xlsx", ".docx"):
+        return filename
+    return f"{p.stem}_{(now or datetime.now()).strftime('%Y%m%d_%H%M%S')}{p.suffix}"
+
 class App:
     """화면이 쓰는 상태. 테스트에서는 today 를 바꿔 날짜를 흉내 낸다."""
 
@@ -129,6 +139,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _download(self, data: bytes, filename: str, ctype: str):
+        filename = stamped(filename)
         q = urllib.parse.quote(filename)
         self._send(data, ctype, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{q}"})
 
@@ -247,11 +258,14 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with self.app.lock:
                         getattr(self, name)(*match.groups())
-                except (ValueError, KeyError) as exc:
+                except (ValueError, KeyError, OSError) as exc:
+                    if isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):
+                        exc = ValueError(f"파일을 읽거나 쓰지 못했습니다 ({exc.strerror or exc}). "
+                                         "같은 파일이 엑셀에서 열려 있으면 닫고 다시 해 주세요.")
                     back = self.headers.get("Referer") or "/"
                     if method == "POST":
                         to = urllib.parse.urlsplit(back).path or "/"
-                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet)", self.path)
+                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet|adjust)", self.path)
                         if sec and to.startswith("/e/"):        # 오류가 난 카드로 돌아간다
                             to += "#" + sec.group(1)
                         self._redirect(to, str(exc), error=True)
@@ -813,6 +827,8 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         return f"""<div class="card" id="questions"><h2 style="margin-top:0">질문서</h2>
 <p>{summary or ''}</p>
 <form id="qact" method="post" action="/e/{eid}/questions/act" class="row">
+<button type="button" class="ghost" onclick="document.querySelectorAll('input[name=ids][form=qact]').forEach(c=>c.checked=true)">모두 선택</button>
+<button type="button" class="ghost" onclick="document.querySelectorAll('input[name=ids][form=qact]').forEach(c=>c.checked=false)">모두 해제</button>
 <button name="action" value="submit" class="ghost">승인 요청</button>
 <button name="action" value="approve">승인</button>
 <button name="action" value="revert" class="ghost">작성으로 되돌리기</button>
