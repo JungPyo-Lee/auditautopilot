@@ -1,7 +1,7 @@
 """여러 파일을 한 번에 받아 종류를 알아서 맞춰 하나의 장부 묶음으로 만든다.
 
 - 세무사랑 '재무제표 등' 묶음 파일 하나
-- 또는 더존 파일 여러 개: 재무상태표, 손익계산서, 거래처원장(계정마다 한 파일), 분개장
+- 또는 더존 파일 여러 개: 합계잔액시산표, 재무상태표, 손익계산서, 거래처원장(계정마다 한 파일), 분개장
 
 명령 예)
   python -m auditautopilot analytics 재무상태표.xlsx 손익계산서.xlsx -o 분석.xlsx --threshold-amount ...
@@ -17,6 +17,7 @@ from pathlib import Path
 import openpyxl
 
 from . import douzone, semusarang
+from .common import squash
 
 
 @dataclass
@@ -29,6 +30,10 @@ class Books:
     periods: dict[str, str] = field(default_factory=dict)
     source: str = ""
     notes: list[str] = field(default_factory=list)
+
+
+_BS_SECTIONS = {"유동자산", "당좌자산", "재고자산", "비유동자산", "투자자산", "유형자산", "무형자산",
+                "기타비유동자산", "유동부채", "비유동부채"}
 
 
 def period_end(label: str) -> date | None:
@@ -48,7 +53,8 @@ def _sheetnames(path: Path) -> list[str]:
         wb.close()
 
 
-def load(paths) -> Books:
+def load(paths, ledger_names: dict[str, str] | None = None) -> Books:
+    """ledger_names: 거래처원장 파일 이름 -> 계정명. 금액으로 못 찾을 때 사람이 정해 준다."""
     paths = [Path(p) for p in ([paths] if isinstance(paths, (str, Path)) else paths)]
     for p in paths:
         if not p.exists():
@@ -66,6 +72,8 @@ def load(paths) -> Books:
             data, periods = douzone.read_fs_rows(rows, kind)
             setattr(books, kind, data)
             books.periods = books.periods or periods
+        elif kind == "tb":
+            books.tb = douzone.read_tb_rows(rows)
         elif kind == "ledger":
             ledgers.append((p, *douzone.read_partner_ledger_rows(rows)))
         elif kind == "journal":
@@ -94,14 +102,30 @@ def load(paths) -> Books:
         if len(books.journal) < before:
             books.notes.append(f"분개장에서 재무제표 기간({end}) 뒤의 {before - len(books.journal):,}줄은 뺐습니다")
 
+    # 거래처원장이 어느 계정인지: 시산표 잔액과 먼저 맞추고, 없으면 재무상태표와 맞춘다
+    tb_accounts, section = [], ""
+    for r in books.tb:
+        if r["level"] == "group":
+            section = r["name"]
+        elif r["level"] == "account" and section in _BS_SECTIONS:
+            tb_accounts.append({"name": r["name"], "code": r["code"], "is_account": True,
+                                "current": r["balance"], "prior": 0.0})
     for p, rows, total in ledgers:
-        name = douzone.match_ledger_account(total, books.bs) if total is not None and books.bs else None
+        name = (ledger_names or {}).get(p.name) or (ledger_names or {}).get(str(p))
+        stem = squash(re.sub(r"[_ ]?\d{8}.*$", "", p.stem))
+        named = name is not None
+        if name is None and stem in {r["name"] for r in tb_accounts + books.bs if r.get("is_account")}:
+            name, named = stem, True      # 파일 이름이 계정명이면 그것을 따른다
+        if name is None and total is not None:
+            for cands in (tb_accounts, books.bs):
+                if cands and name is None:
+                    name = douzone.match_ledger_account(total, cands)
         if name is None:
             name = re.sub(r"[_ ]?\d{8}.*$", "", p.stem) or p.stem
-            books.notes.append(f"{p.name}: 합계 잔액과 같은 재무상태표 계정을 못 찾아 '{name}'(으)로 둠")
-        else:
-            books.notes.append(f"{p.name}: 합계 잔액 {total['balance']:,.0f}원 = 재무상태표 '{name}'")
-        code = next((r["code"] for r in books.bs if r["name"] == name and r.get("code")), None)
+            books.notes.append(f"{p.name}: 합계 잔액과 같은 시산표·재무상태표 계정을 못 찾아 '{name}'(으)로 둠")
+        elif total is not None and not named:
+            books.notes.append(f"{p.name}: 합계 잔액 {total['balance']:,.0f}원 = '{name}'")
+        code = next((r["code"] for r in tb_accounts + books.bs if r["name"] == name and r.get("code")), None)
         for r in rows:
             r["account_name"] = name
             r["account_code"] = code

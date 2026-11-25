@@ -62,6 +62,7 @@ class XlsxPackage:
         self._rels = self._data["xl/_rels/workbook.xml.rels"].decode("utf-8")
         self._ct = self._data["[Content_Types].xml"].decode("utf-8")
         self._new_files: dict[str, bytes] = {}
+        self._sheet_edits: dict[str, SheetXml] = {}
 
     # ---- 시트 ----
     def _rel_targets(self) -> dict[str, str]:
@@ -220,10 +221,88 @@ class XlsxPackage:
                 return i
         raise ValueError("보이는 시트가 하나도 없습니다.")
 
+    # ---- 셀 쓰기 ----
+    def sheet(self, name: str) -> "SheetXml":
+        """시트 내용을 고칠 수 있는 편집기. 저장할 때 반영된다."""
+        if name not in self._sheet_edits:
+            info = next((s for s in self.sheets() if s.name == name), None)
+            if info is None:
+                raise KeyError(name)
+            self._sheet_edits[name] = SheetXml(self._data[info.path].decode("utf-8"), name)
+        return self._sheet_edits[name]
+
+    def has_sheet(self, name: str) -> bool:
+        return any(s.name == name for s in self.sheets())
+
+    def insert_rows(self, name: str, before: int, count: int) -> None:
+        """name 시트의 before 행 앞에 빈 행 count개를 넣는다. 다른 시트·이름 정의의 참조도 맞춘다."""
+        if count <= 0:
+            return
+        self.sheet(name).insert_rows(before, count)
+        for info in self.sheets():
+            if info.name == name or info.path not in self._data:
+                continue
+            ed = self._sheet_edits.get(info.name)
+            if ed is not None:
+                ed.shift_foreign_refs(name, before, count)
+                continue
+            raw = self._data[info.path]
+            if _quoted_sheet(name).encode() in raw or (name + "!").encode() in raw:
+                ed = self.sheet(info.name)
+                ed.shift_foreign_refs(name, before, count)
+
+        def fix(m: re.Match) -> str:
+            return m.group(1) + shift_formula(m.group(2), name, before, count, own=False) + m.group(3)
+        self._wb = re.sub(r"(<definedName\b[^>]*>)(.*?)(</definedName>)", fix, self._wb, flags=re.S)
+
+    def recalc_on_open(self) -> None:
+        """수식 값을 바꿨으므로 엑셀이 열 때 다시 계산하게 한다. calcChain은 지운다(엑셀이 다시 만든다)."""
+        if "xl/calcChain.xml" in self._data:
+            del self._data["xl/calcChain.xml"]
+            self._infos = [i for i in self._infos if i.filename != "xl/calcChain.xml"]
+            self._rels = re.sub(r'<Relationship\b[^>]*Target="[^"]*calcChain\.xml"[^>]*/>', "", self._rels)
+            self._ct = re.sub(r'<Override\b[^>]*PartName="/xl/calcChain\.xml"[^>]*/>', "", self._ct)
+        m = re.search(r"<calcPr\b[^>]*?/?>", self._wb)
+        if m:
+            tag = re.sub(r'\s+fullCalcOnLoad="[^"]*"', "", m.group(0))
+            end = "/>" if tag.endswith("/>") else ">"
+            tag = tag[: -len(end)].rstrip() + ' fullCalcOnLoad="1"' + end
+            self._wb = self._wb[:m.start()] + tag + self._wb[m.end():]
+        else:
+            self._wb = self._wb.replace("</workbook>", '<calcPr fullCalcOnLoad="1"/></workbook>')
+
+    def drop_cached_values(self) -> int:
+        """모든 시트 수식 셀의 저장된 결과(<v>)를 지운다. 미리보기 프로그램이 양식의 옛 예시 값을
+        보여 주지 않게 한다. 엑셀은 열 때 다시 계산한다."""
+        n = 0
+        for info in self.sheets():
+            if info.path not in self._data:
+                continue
+            ed = self.sheet(info.name)
+            before = ed.xml
+            count = [0]
+
+            def strip(m: re.Match) -> str:
+                c = m.group(0)
+                if "<f" not in c or "<v>" not in c:
+                    return c
+                count[0] += 1
+                head, rest = c.split(">", 1)
+                head = re.sub(r'\s+t="(?:str|b|e|n)"', "", head)
+                return head + ">" + re.sub(r"<v>[^<]*</v>", "", rest)
+            ed.xml = _CELL_RE.sub(strip, ed.xml)
+            n += count[0]
+            if ed.xml == before:
+                del self._sheet_edits[info.name]
+        return n
+
     # ---- 저장 ----
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        targets = {s.name: s.path for s in self.sheets()}
+        for name, ed in self._sheet_edits.items():
+            self._data[targets[name]] = ed.xml.encode("utf-8")
         self._data["xl/workbook.xml"] = self._wb.encode("utf-8")
         self._data["xl/_rels/workbook.xml.rels"] = self._rels.encode("utf-8")
         self._data["[Content_Types].xml"] = self._ct.encode("utf-8")
@@ -279,3 +358,248 @@ def build_sheet_xml(rows: list[list[str | None]], links: dict[tuple[int, int], s
 
 def sheet_link(name: str, cell: str = "A1") -> str:
     return "'" + name.replace("'", "''") + "'!" + cell
+
+
+# ---------------------------------------------------------------- 셀 편집
+
+def column_index(letters: str) -> int:
+    """'A' -> 0, 'AA' -> 26"""
+    n = 0
+    for ch in letters:
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
+def split_ref(ref: str) -> tuple[str, int]:
+    m = re.fullmatch(r"\$?([A-Z]{1,3})\$?(\d+)", ref)
+    if not m:
+        raise ValueError(ref)
+    return m.group(1), int(m.group(2))
+
+
+class Formula(str):
+    """셀에 수식으로 넣을 글자 ('=' 없이 또는 있게)."""
+
+
+_ROW_RE = re.compile(r'<row\b[^>]*?\br="(\d+)"[^>]*?(?:/>|>.*?</row>)', re.S)
+_CELL_RE = re.compile(r'<c\b[^>]*?\br="([A-Z]{1,3})(\d+)"[^>]*?(?:/>|>.*?</c>)', re.S)
+_REF_IN_FORMULA = re.compile(
+    r"(?<![A-Za-z0-9_.!$'\u0080-￿])"
+    r"((?:'(?:[^']|'')+'|[A-Za-z0-9_.\u0080-￿]+)!)?"
+    r"(\$?)([A-Z]{1,3})(\$?)(\d+)(?![\d(A-Za-z_])")
+
+
+def _quoted_sheet(name: str) -> str:
+    return "'" + name.replace("'", "''") + "'!"
+
+
+def _sheet_of_prefix(prefix: str) -> str:
+    p = prefix[:-1]
+    if p.startswith("'"):
+        p = p[1:-1].replace("''", "'")
+    return p
+
+
+def shift_formula(text: str, sheet: str, before: int, count: int, own: bool) -> str:
+    """수식 안의 참조 중 sheet 시트의 before 행 이상을 count만큼 내린다.
+    own=True 면 시트 이름이 없는 참조도 그 시트로 본다. 따옴표 안 글자는 건드리지 않는다."""
+    def repl(m: re.Match) -> str:
+        prefix = m.group(1)
+        target = _sheet_of_prefix(prefix) if prefix else (sheet if own else None)
+        row = int(m.group(5))
+        if target != sheet or row < before:
+            return m.group(0)
+        return f"{prefix or ''}{m.group(2)}{m.group(3)}{m.group(4)}{row + count}"
+    parts = re.split(r'("(?:[^"]|"")*")', text)
+    return "".join(p if i % 2 else _REF_IN_FORMULA.sub(repl, p) for i, p in enumerate(parts))
+
+
+def _shift_sqref(text: str, before: int, count: int) -> str:
+    def repl(m: re.Match) -> str:
+        row = int(m.group(4))
+        return m.group(0) if row < before else f"{m.group(1)}{m.group(2)}{m.group(3)}{row + count}"
+    return re.sub(r"(\$?)([A-Z]{1,3})(\$?)(\d+)", repl, text)
+
+
+def _num(v: float) -> str:
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if float(v).is_integer():
+        return str(int(v))
+    return repr(float(v))
+
+
+class SheetXml:
+    """시트 XML 글자를 필요한 곳만 바꾼다 (나머지 서식·도형 연결은 그대로)."""
+
+    def __init__(self, xml: str, name: str = ""):
+        self.xml = xml
+        self.name = name
+
+    # ---- 읽기 ----
+    def _rows(self) -> list[re.Match]:
+        m = re.search(r"<sheetData>(.*?)</sheetData>", self.xml, re.S)
+        if not m:
+            return []
+        return list(_ROW_RE.finditer(self.xml, m.start(1), m.end(1)))
+
+    def max_row(self) -> int:
+        return max((int(m.group(1)) for m in self._rows()), default=0)
+
+    def cell_xml(self, ref: str) -> str | None:
+        col, row = split_ref(ref)
+        for m in self._rows():
+            if int(m.group(1)) == row:
+                for c in _CELL_RE.finditer(m.group(0)):
+                    if c.group(1) == col:
+                        return c.group(0)
+        return None
+
+    def style_of(self, ref: str) -> str | None:
+        x = self.cell_xml(ref)
+        m = re.search(r'\bs="(\d+)"', x or "")
+        return m.group(1) if m else None
+
+    def has_drawing(self) -> bool:
+        return bool(re.search(r"<(drawing|legacyDrawing|tableParts)\b", self.xml))
+
+    # ---- 쓰기 ----
+    def _ensure_row(self, row: int) -> tuple[int, int]:
+        rows = self._rows()
+        for m in rows:
+            if int(m.group(1)) == row:
+                return m.start(), m.end()
+        new = f'<row r="{row}"></row>'
+        after = next((m for m in rows if int(m.group(1)) > row), None)
+        if after is not None:
+            pos = after.start()
+        else:
+            if "<sheetData/>" in self.xml:
+                self.xml = self.xml.replace("<sheetData/>", "<sheetData></sheetData>", 1)
+            pos = self.xml.index("</sheetData>")
+        self.xml = self.xml[:pos] + new + self.xml[pos:]
+        return pos, pos + len(new)
+
+    def set(self, ref: str, value, style: str | None = None) -> None:
+        """value: None(비움), 숫자, 글자, Formula. style을 안 주면 원래 셀의 서식을 그대로 둔다."""
+        col, row = split_ref(ref)
+        start, end = self._ensure_row(row)
+        row_xml = self.xml[start:end]
+        old = next((c for c in _CELL_RE.finditer(row_xml) if c.group(1) == col), None)
+        if old is not None and re.search(r'<f\b[^>]*\bt="shared"[^>]*\bref="', old.group(0)):
+            self.unshare(re.search(r'\bsi="(\d+)"', old.group(0)).group(1))
+            start, end = self._ensure_row(row)
+            row_xml = self.xml[start:end]
+            old = next((c for c in _CELL_RE.finditer(row_xml) if c.group(1) == col), None)
+        if old is not None:
+            if style is None:
+                m = re.search(r'\bs="(\d+)"', old.group(0).split(">", 1)[0])
+                style = m.group(1) if m else None
+        attrs = f' r="{col}{row}"' + (f' s="{style}"' if style else "")
+        if value is None or value == "":
+            new = f"<c{attrs}/>"
+        elif isinstance(value, Formula):
+            f = value[1:] if value.startswith("=") else value
+            new = f"<c{attrs}><f>{escape(f)}</f></c>"
+        elif isinstance(value, (int, float)):
+            new = f"<c{attrs}><v>{_num(value)}</v></c>"
+        else:
+            new = f'<c{attrs} t="inlineStr"><is><t xml:space="preserve">{escape(str(value))}</t></is></c>'
+        if old is not None:
+            row_xml = row_xml[:old.start()] + new + row_xml[old.end():]
+        else:
+            if row_xml.endswith("/>"):
+                row_xml = row_xml[:-2] + "></row>"
+            idx = column_index(col)
+            after = next((c for c in _CELL_RE.finditer(row_xml) if column_index(c.group(1)) > idx), None)
+            pos = after.start() if after is not None else row_xml.rindex("</row>")
+            row_xml = row_xml[:pos] + new + row_xml[pos:]
+        row_xml = re.sub(r'\s+spans="[^"]*"', "", row_xml, count=1)
+        self.xml = self.xml[:start] + row_xml + self.xml[end:]
+
+    def unshare(self, si: str) -> None:
+        """공유 수식 묶음(si)을 셀마다 따로 쓴 수식으로 푼다. 원본 셀을 바꾸기 전에 쓴다."""
+        master = re.search(r'<c\b[^>]*?\br="([A-Z]{1,3})(\d+)"[^>]*>(?:(?!</c>).)*?'
+                           r'<f\b([^>]*\bt="shared"[^>]*\bsi="%s"[^>]*)>(.*?)</f>' % si, self.xml, re.S)
+        if not master or "ref=" not in master.group(3):
+            return
+        mc, mr, text = column_index(master.group(1)), int(master.group(2)), html.unescape(master.group(4))
+
+        def moved(dc: int, dr: int) -> str:
+            def repl(m: re.Match) -> str:
+                col = m.group(3) if m.group(2) else column_letter(column_index(m.group(3)) + dc)
+                row = m.group(5) if m.group(4) else str(int(m.group(5)) + dr)
+                return f"{m.group(1) or ''}{m.group(2)}{col}{m.group(4)}{row}"
+            parts = re.split(r'("(?:[^"]|"")*")', text)
+            return "".join(p if i % 2 else _REF_IN_FORMULA.sub(repl, p) for i, p in enumerate(parts))
+
+        def fix(m: re.Match) -> str:
+            c = m.group(0)
+            if not re.search(r'<f\b[^>]*\bt="shared"[^>]*\bsi="%s"' % si, c):
+                return c
+            col, row = column_index(m.group(1)), int(m.group(2))
+            c = re.sub(r'<f\b[^>]*?(?:/>|>.*?</f>)', lambda _: f"<f>{escape(moved(col - mc, row - mr))}</f>", c,
+                       count=1, flags=re.S)
+            return c
+        self.xml = _CELL_RE.sub(fix, self.xml)
+
+    # ---- 행 넣기 ----
+    def insert_rows(self, before: int, count: int) -> None:
+        if self.has_drawing():
+            raise ValueError(f"{self.name}: 도형·표가 있는 시트에는 행을 넣지 않습니다")
+
+        def fix_cell(m: re.Match) -> str:
+            c = m.group(0)
+            row = int(m.group(2))
+            if row >= before:
+                c = c.replace(f'r="{m.group(1)}{row}"', f'r="{m.group(1)}{row + count}"', 1)
+            return self._shift_formulas_in(c, before, count)
+
+        def fix_row(m: re.Match) -> str:
+            r = m.group(0)
+            row = int(m.group(1))
+            if row >= before:
+                r = re.sub(r'(<row\b[^>]*?\br=")\d+"', lambda x: f'{x.group(1)}{row + count}"', r, count=1)
+            return _CELL_RE.sub(fix_cell, r)
+
+        data = re.search(r"<sheetData>(.*?)</sheetData>", self.xml, re.S)
+        if data:
+            body = _ROW_RE.sub(fix_row, data.group(1))
+            self.xml = self.xml[:data.start(1)] + body + self.xml[data.end(1):]
+        for tag, attr in (("mergeCell", "ref"), ("dimension", "ref"), ("conditionalFormatting", "sqref"),
+                          ("dataValidation", "sqref"), ("hyperlink", "ref"), ("selection", "sqref"),
+                          ("selection", "activeCell"), ("pane", "topLeftCell")):
+            self.xml = re.sub(rf'(<{tag}\b[^>]*?\b{attr}=")([^"]*)(")',
+                              lambda m: m.group(1) + _shift_sqref(m.group(2), before, count) + m.group(3), self.xml)
+        self.xml = re.sub(r'(<conditionalFormatting\b.*?</conditionalFormatting>)',
+                          lambda m: re.sub(r"(<formula>)(.*?)(</formula>)",
+                                           lambda f: f.group(1) + shift_formula(f.group(2), self.name, before, count, True)
+                                           + f.group(3), m.group(1), flags=re.S),
+                          self.xml, flags=re.S)
+        self.xml = re.sub(r'(<brk\b[^>]*?\bid=")(\d+)(")',
+                          lambda m: m.group(1) + str(int(m.group(2)) + (count if int(m.group(2)) >= before else 0))
+                          + m.group(3), self.xml)
+
+    def _shift_formulas_in(self, cell_xml: str, before: int, count: int, sheet: str | None = None,
+                           own: bool = True) -> str:
+        sheet = sheet or self.name
+
+        def fix_f(m: re.Match) -> str:
+            open_tag = m.group(1)
+            if own:
+                open_tag = re.sub(r'(\bref=")([^"]*)(")',
+                                  lambda x: x.group(1) + _shift_sqref(x.group(2), before, count) + x.group(3), open_tag)
+            body = html.unescape(m.group(2))
+            new = shift_formula(body, sheet, before, count, own)
+            return open_tag + (escape(new) if new != body else m.group(2)) + m.group(3)
+        return re.sub(r"(<f\b[^>]*>)(.*?)(</f>)", fix_f, cell_xml, flags=re.S)
+
+    def shift_foreign_refs(self, sheet: str, before: int, count: int) -> None:
+        """다른 시트(sheet)의 행이 밀렸을 때 이 시트 수식의 그 시트 참조를 맞춘다."""
+        data = re.search(r"<sheetData>(.*?)</sheetData>", self.xml, re.S)
+        if not data:
+            return
+        body = re.sub(r"<f\b[^>]*>.*?</f>",
+                      lambda m: self._shift_formulas_in(m.group(0), before, count, sheet, own=False),
+                      data.group(1), flags=re.S)
+        self.xml = self.xml[:data.start(1)] + body + self.xml[data.end(1):]

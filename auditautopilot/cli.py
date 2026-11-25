@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from pathlib import Path
 
 from . import analytics, confirm, materiality, sampling
 from .importers import books as books_mod
@@ -209,6 +210,21 @@ def cmd_confirm(args) -> int:
     return 0
 
 
+def cmd_leadsheet(args) -> int:
+    from .workpaper import leadsheet
+
+    names = {}
+    for item in args.ledger or []:
+        if "=" not in item:
+            raise ValueError(f"--ledger 는 '파일=계정명' 꼴로 주세요: {item}")
+        f, acc = item.split("=", 1)
+        names[Path(f).name] = acc.strip()
+    res = leadsheet.build(args.workpaper, args.src, args.output, names)
+    print("\n".join(res.lines()))
+    print(f"저장: {args.output}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .manage.web import serve
 
@@ -273,6 +289,14 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("src", nargs="+", help="회신현황 엑셀. 더존 재무상태표·거래처원장을 함께 주면 장부와 맞춰 본다")
     co.add_argument("-o", "--output", required=True)
     co.set_defaults(func=cmd_confirm)
+
+    ls = sub.add_parser("leadsheet", help="합계잔액시산표로 조서 TB·BS·IS 탭(리드시트)과 ○1100 거래처 명세 채우기")
+    ls.add_argument("workpaper", help="조서 양식 엑셀 (TB·BS·IS 탭이 있는 파일)")
+    ls.add_argument("src", nargs="+", help="더존 합계잔액시산표 (필수), 재무상태표·손익계산서(과목별), 거래처원장(잔액)")
+    ls.add_argument("--ledger", action="append", metavar="파일=계정명",
+                    help="거래처원장이 어느 계정인지 직접 정할 때. 예: --ledger 거래처원장(1).xlsx=외상매출금")
+    ls.add_argument("-o", "--output", required=True)
+    ls.set_defaults(func=cmd_leadsheet)
 
     sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
     sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")

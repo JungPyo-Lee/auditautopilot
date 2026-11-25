@@ -9,7 +9,9 @@
 - 거래처원장(잔액): 거래처 | 전기(월)이월 | 차변 | 대변 | 잔액, 마지막 줄 '합계'.
   어느 계정의 원장인지 파일에 없으므로 합계 잔액을 재무상태표 계정 금액과 맞춰 찾는다.
 
-합계잔액시산표는 샘플을 받으면 추가한다.
+- 합계잔액시산표: 차변(잔액, 합계) | 계정과목 | 대변(합계, 잔액). 머리글 2줄.
+  과목은 '[108] 외 상 매 출 금' 또는 '[0103] 보 통 예 금'. 구분 줄은 '◀유동자산▶', '◁당좌자산▷',
+  또는 '1.유동자산', '＜당좌자산＞' 처럼 두 가지 모양이 있다. 마지막 줄 '합 계'.
 """
 
 from __future__ import annotations
@@ -80,8 +82,10 @@ def _rows_of(path: str | Path) -> list[tuple]:
 
 
 def detect_kind(rows: list[tuple]) -> str | None:
-    """첫 몇 줄을 보고 더존 파일 종류를 맞힌다: journal, bs, pl, ledger, partner_list."""
+    """첫 몇 줄을 보고 더존 파일 종류를 맞힌다: journal, bs, pl, ledger, partner_list, tb."""
     head = [squash(v) for r in rows[:5] for v in r if v is not None]
+    if "계정과목" in head and head.count("잔액") >= 2 and head.count("합계") >= 2:
+        return "tb"
     names = [squash(cell(r, 0)) for r in rows[:120]]
     if {"전표일자", "전표번호"} <= set(head):
         return "journal"
@@ -95,6 +99,51 @@ def detect_kind(rows: list[tuple]) -> str | None:
     if head[:1] == ["거래처"] and all(len(r) <= 1 or all(_blank(v) for v in r[1:]) for r in rows[:20]):
         return "partner_list"
     return None
+
+
+_TB_MARKS = "◀▶◁▷<>＜＞[]【】「」"
+
+
+def section_label(text: object) -> str:
+    """'◀유    동    자    산▶', '1.유    동    자    산', '＜당좌자산＞', 'Ⅳ. 판매비와 관리비' -> 과목 구분 이름."""
+    s = squash(text).strip(_TB_MARKS)
+    s = re.sub(r"^(\d+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+)\.", "", s)
+    s = re.sub(r"^(\(\d+\)|[①-⑳])", "", s)
+    return s.strip(_TB_MARKS)
+
+
+def read_tb_rows(rows: list[tuple]) -> list[dict]:
+    """합계잔액시산표. 결과 행: code, name, level(account/group/total),
+    debit_balance, debit_total, credit_total, credit_balance, balance(차변-대변)"""
+    header = next(i for i, r in enumerate(rows[:10])
+                  if [squash(v) for v in r].count("잔액") >= 2 and [squash(v) for v in r].count("합계") >= 2)
+    names = [squash(v) for v in rows[header]]
+    above = [squash(v) for v in rows[header - 1]] if header else []
+    if "계정과목" in names:
+        name_col = names.index("계정과목")
+    elif "계정과목" in above:
+        name_col = above.index("계정과목")
+    else:
+        name_col = [i for i, n in enumerate(names) if n == "합계"][0] + 1
+    bal = [i for i, n in enumerate(names) if n == "잔액"]
+    tot = [i for i, n in enumerate(names) if n == "합계"]
+    out = []
+    for row in rows[header + 1:]:
+        label = cell(row, name_col)
+        if _blank(label):
+            continue
+        m = re.match(r"^\s*\[(\d{3,5})\]\s*(.+?)\s*$", str(label))
+        if m:
+            code, name, level = normalize_code(m.group(1)), squash(m.group(2)), "account"
+        else:
+            name = section_label(label)
+            code, level = None, "total" if name in ("합계", "총계") else "group"
+        db, cb = to_number(cell(row, bal[0])), to_number(cell(row, bal[-1]))
+        out.append({"code": code, "name": name, "level": level,
+                    "debit_balance": db, "debit_total": to_number(cell(row, tot[0])),
+                    "credit_total": to_number(cell(row, tot[-1])), "credit_balance": cb,
+                    "balance": db - cb})
+    return out
 
 
 def read_fs_rows(rows: list[tuple], kind: str = "bs") -> tuple[list[dict], dict[str, str]]:
