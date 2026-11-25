@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS mail_log (
   item_codes TEXT NOT NULL DEFAULT '[]',
   UNIQUE (engagement_id, kind, planned_on)
 );
+CREATE TABLE IF NOT EXISTS mail_seen (
+  key TEXT PRIMARY KEY,
+  seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS big_links (
+  id INTEGER PRIMARY KEY,
+  engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  sender TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  received_on TEXT NOT NULL,
+  done INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (engagement_id, url)
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -310,3 +324,25 @@ class Store:
     def request_sent(self, engagement_id: int) -> bool:
         return self._one("SELECT 1 FROM mail_log WHERE engagement_id = ? AND kind = 'request'",
                          engagement_id) is not None
+
+    # ── 받은 메일 ─────────────────────────────────────
+    def mail_seen(self, key: str) -> bool:
+        return self._one("SELECT 1 FROM mail_seen WHERE key = ?", key) is not None
+
+    def mark_mail_seen(self, key: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR IGNORE INTO mail_seen(key, seen_at) VALUES(?, ?)",
+                      (key, datetime.now().isoformat(timespec="seconds")))
+
+    def add_link(self, engagement_id: int, url: str, sender: str, subject: str, received_on: date) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR IGNORE INTO big_links(engagement_id, url, sender, subject, received_on) "
+                      "VALUES(?, ?, ?, ?, ?)", (engagement_id, url, sender, subject, _iso(received_on)))
+
+    def links(self, engagement_id: int, include_done: bool = False) -> list[dict]:
+        sql = "SELECT * FROM big_links WHERE engagement_id = ?" + ("" if include_done else " AND done = 0")
+        return self._all(sql + " ORDER BY received_on DESC, id DESC", engagement_id)
+
+    def set_link_done(self, link_id: int) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE big_links SET done = 1 WHERE id = ?", (link_id,))
