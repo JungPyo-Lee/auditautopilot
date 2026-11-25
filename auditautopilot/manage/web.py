@@ -48,7 +48,7 @@ color:#fff;border-radius:5px;cursor:pointer;display:inline-block}button.ghost,.b
 .pill{display:inline-block;padding:1px 8px;border-radius:10px;color:#fff;font-size:12px;white-space:nowrap}
 .mute{color:var(--mute)}.warn{color:var(--warn)}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
 .row label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mute)}
-.msg{padding:10px 14px;border-radius:6px;background:#e8f1ff;margin-bottom:16px}.msg.err{background:#fdecea}
+.msg{padding:10px 14px;border-radius:6px;background:#e8f1ff;margin-bottom:16px;position:sticky;top:0;z-index:5;box-shadow:0 2px 6px rgba(0,0,0,.12)}.msg.err{background:#fdecea}
 pre{white-space:pre-wrap;font-family:inherit;background:#fafbfc;border:1px solid var(--line);padding:10px;border-radius:6px;margin:6px 0}
 .bar{height:8px;background:#e9ecf1;border-radius:4px;overflow:hidden;min-width:120px}
 .bar i{display:block;height:100%;background:#1d8a4e}
@@ -244,7 +244,11 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, KeyError) as exc:
                     back = self.headers.get("Referer") or "/"
                     if method == "POST":
-                        self._redirect(urllib.parse.urlsplit(back).path or "/", str(exc), error=True)
+                        to = urllib.parse.urlsplit(back).path or "/"
+                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet)", self.path)
+                        if sec and to.startswith("/e/"):        # 오류가 난 카드로 돌아간다
+                            to += "#" + sec.group(1)
+                        self._redirect(to, str(exc), error=True)
                     else:
                         self._send(page("오류", f"<p>{esc(exc)}</p>"), status=HTTPStatus.BAD_REQUEST)
                 return

@@ -11,6 +11,7 @@ import openpyxl
 from auditautopilot.manage import config, confirmations, mailbox, nicebiz, questions
 from test_mailbox import FakeSMTP
 from test_nicebiz import site, store  # noqa: F401  (픽스처 재사용)
+from test_manage import server  # noqa: F401
 
 TODAY = date(2027, 1, 12)
 
@@ -151,3 +152,12 @@ def test_answer_by_mail(store):  # noqa: F811
     r = mailbox.process_message(store, config.load(store), m.as_bytes(), TODAY)
     assert r["engagement"]["id"] == e["id"] and "질문서" in str(r["files"][0]["path"])
     assert questions.get(store, a)["status"] == "답변받음"
+
+
+def test_from_confirm_without_status_returns_to_card(server, store):  # noqa: F811
+    from test_manage import _open
+    base, _ = server
+    cid = store.add_client("C010", "가나상사", "김담당", "kim@example.com")
+    eid = store.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
+    st, h, _ = _open(base + f"/e/{eid}/questions/from-confirm", {}, {"Referer": base + f"/e/{eid}"})
+    assert st == 303 and h["Location"].startswith(f"/e/{eid}?err=") and h["Location"].endswith("#questions")
