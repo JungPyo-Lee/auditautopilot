@@ -231,6 +231,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/adjusted\.xlsx", "adjusted_xlsx"),
         ("GET", r"/e/(\d+)/notes-request\.xlsx", "notes_request"),
         ("GET", r"/e/(\d+)/report\.docx", "report_docx"),
+        ("POST", r"/e/(\d+)/notes-filled", "notes_filled"),
+        ("GET", r"/e/(\d+)/fs\.docx", "fs_docx"),
         ("POST", r"/e/(\d+)/questions", "question_add"),
         ("POST", r"/e/(\d+)/questions/act", "question_act"),
         ("POST", r"/e/(\d+)/questions/(\d+)", "question_edit"),
@@ -278,9 +280,9 @@ class Handler(BaseHTTPRequestHandler):
                     back = self.headers.get("Referer") or "/"
                     if method == "POST":
                         to = urllib.parse.urlsplit(back).path or "/"
-                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet|adjust)", self.path)
+                        sec = re.match(r"/e/\d+/(questions|confirm|leadsheet|adjust|notes-filled)", self.path)
                         if sec and to.startswith("/e/"):        # 오류가 난 카드로 돌아간다
-                            to += "#" + sec.group(1)
+                            to += "#" + {"notes-filled": "closing"}.get(sec.group(1), sec.group(1))
                         self._redirect(to, str(exc), error=True)
                     else:
                         self._send(page("오류", f"<p>{esc(exc)}</p>"), status=HTTPStatus.BAD_REQUEST)
@@ -692,19 +694,25 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 
     def _closing_part(self, e, adj_rec) -> str:
         eid = e["id"]
+        title = '<h3 id="closing">주석 자료 · 재무제표·주석 초안 (워드)</h3>'
         if not adj_rec:
-            return """<h3 id="closing">주석 자료 요청 · 감사보고서 초안</h3>
-<p class="mute">위에서 [수정분개 반영]을 한 번 하면 여기에 주석 자료요청 양식과 감사보고서 초안 버튼이 생깁니다.
+            return title + """<p class="mute">위에서 [수정분개 반영]을 한 번 하면 여기에 주석 자료요청 양식과 재무제표·주석 초안 버튼이 생깁니다.
 수정분개가 없으면 모든 칸이 비어 있는 수정분개 양식을 그대로 올려도 됩니다.</p>"""
-        opts = "".join(f"<option>{o}</option>" for o in ("적정", "한정", "부적정", "의견거절"))
-        return f"""<h3 id="closing">주석 자료 요청 · 감사보고서 초안</h3>
-<p class="row"><a class="btn ghost" href="/e/{eid}/notes-request.xlsx">주석 자료요청 양식 내려받기</a></p>
+        nrec = self.store.get_setting(f"notes_filled:{eid}") or {}
+        got = (f"<p>{esc(nrec.get('made_at', ''))} 받은 주석 자료: <b>{esc(nrec.get('name', ''))}</b> "
+               f"(초안에 이 파일을 씁니다)</p>" if nrec else
+               "<p class='mute'>아직 받은 주석 자료가 없습니다. 지금 초안을 만들면 정산표 금액만 들어가고 회사 작성 주석은 [ ]로 비어 있습니다.</p>")
+        return title + f"""
+<p class="row"><a class="btn ghost" href="/e/{eid}/notes-request.xlsx">① 주석 자료요청 양식 내려받기</a></p>
 <p class="mute">수정분개까지 반영한 금액을 미리 넣은 주석 시트(회색 칸)와 회사가 처음부터 채울 시트(특수관계자·담보·보험·토지 공시지가·약정·소송 등)로 나뉩니다.
 계정이 없는 주석은 빠집니다. 회사에 보내 채워 받으세요.</p>
-<form method="get" action="/e/{eid}/report.docx" class="row"><label>감사의견<select name="opinion">{opts}</select></label>
-<button class="ghost">감사보고서 초안 (워드)</button></form>
-<p class="mute">조서 '일반사항' 탭의 회사명·결산일·회계법인·감사종료일로 감사보고서 문구를 채우고, 뒤에 정산표 기준 재무제표 요약(회사 재무제표 대사용)을 붙입니다.
-적정이 아니면 근거 단락을 [ ]로 비워 둡니다.</p>"""
+<form method="post" action="/e/{eid}/notes-filled" enctype="multipart/form-data" class="row">
+<label>② 회사가 채운 주석 자료<input type="file" name="notes" accept=".xlsx" required></label>
+<button class="ghost">올리기</button></form>
+{got}
+<p class="row"><a class="btn" href="/e/{eid}/fs.docx">③ 재무제표·주석 초안 (워드)</a></p>
+<p class="mute">재무상태표·손익계산서·자본변동표·현금흐름표(정산표 금액)와 받은 주석 자료의 시트마다 주석 하나를 넣은 워드 파일입니다.
+표는 워드 표라 그대로 복사해 붙여 넣을 수 있습니다. 회사 개요·회계정책처럼 자료에 없는 주석은 [ ]로 비워 둡니다.</p>"""
 
     def _adjusted_workpaper(self, e) -> Path:
         rec = self.store.get_setting(f"adjust:{e['id']}") or {}
@@ -735,6 +743,43 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             out, _ = report.draft(self._adjusted_workpaper(e), Path(tmp) / "r.docx", opinion)
             data = out.read_bytes()
         self._download(data, f"{e['client_name']}_감사보고서_초안.docx",
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    def notes_filled(self, eid):
+        from datetime import datetime
+
+        from ..workpaper import fs_doc
+
+        e, cfg = self._eng(eid), self.app.cfg()
+        _, files = self._form()
+        got = [(n, d) for n, d in files if d]
+        if not got:
+            raise ValueError("회사가 채운 주석 자료 파일을 골라 주세요.")
+        name, data = got[0]
+        if not name.lower().endswith(".xlsx"):
+            raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+        if "목차" not in xlsx_sheet_names(data):
+            raise ValueError(f"{name}: 주석 자료요청 양식(목차 시트가 있는 파일)이 아닙니다.")
+        saved = filing.save_file(self.store, e, cfg, name, data=data, received_on=self.app.today(),
+                                 source="주석 자료", category="조서")
+        items = fs_doc.read_filled_notes(saved["path"])
+        self.store.set_setting(f"notes_filled:{e['id']}", {
+            "made_at": datetime.now().replace(microsecond=0).isoformat(" "), "path": str(saved["path"]),
+            "name": name})
+        self._redirect(f"/e/{eid}#closing", f"주석 자료를 받았습니다: 주석 {len(items)}개")
+
+    def fs_docx(self, eid):
+        import tempfile
+
+        from ..workpaper import fs_doc
+
+        e = self._eng(eid)
+        nrec = self.store.get_setting(f"notes_filled:{e['id']}") or {}
+        npath = Path(nrec["path"]) if nrec.get("path") and Path(nrec["path"]).exists() else None
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            res = fs_doc.draft(self._adjusted_workpaper(e), Path(tmp) / "fs.docx", npath)
+            data = res.output.read_bytes()
+        self._download(data, f"{e['client_name']}_재무제표_주석_초안.docx",
                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     def _last_workpaper(self, e) -> Path:
