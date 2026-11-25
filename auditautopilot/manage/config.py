@@ -27,6 +27,17 @@ REMINDER_BODY = """{담당자}님, 안녕하세요. {회계법인} {작성자}�
 
 준비에 시간이 걸리는 자료는 가능한 일정을 회신해 주시면 감사 일정에 반영하겠습니다. 감사합니다."""
 
+QUESTION_SUBJECT = "[{회계법인}] {회사명} {사업연도} {감사구분} 질문 드립니다 ({질문 건수}건) [{감사코드}]"
+QUESTION_BODY = """{담당자}님, 안녕하세요. {회계법인} {작성자}입니다.
+
+{사업연도} {감사구분}과 관련하여 아래 사항을 여쭙습니다.
+첨부한 질문서 엑셀의 '답변' 칸에 적어 {회신기한}까지 이 메일에 회신해 주시고, 근거 자료가 있으면 함께 보내 주세요.
+
+{질문 표}
+
+문의: {작성자} ({연락처})
+감사합니다.
+"""
 DDAY_BODY = """{담당자}님, 안녕하세요. {회계법인} {작성자}입니다.
 
 오늘부터 현장감사가 시작됩니다. 아래 자료는 방문 중에 받을 수 있도록 준비 부탁드립니다.
@@ -64,6 +75,9 @@ DEFAULTS = {
     "reminder_subject": REMINDER_SUBJECT,
     "reminder_body": REMINDER_BODY,
     "dday_body": DDAY_BODY,
+    "question_subject": QUESTION_SUBJECT,
+    "question_body": QUESTION_BODY,
+    "question_due_days": 5,   # 질문서 회신기한 = 보낸 날 + n일
     # 메일 계정 여러 개: [{user, provider, imap_host, imap_port, smtp_host, smtp_port}]
     # 비밀번호는 여기에 저장하지 않는다
     "mail_accounts": [],

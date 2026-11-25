@@ -292,6 +292,18 @@ def process_message(store, cfg: dict, raw: bytes, today: date) -> dict:
         data = part.get_payload(decode=True)
         if not name or not data:
             continue
+        if name.lower().endswith(".xlsx") and "질문서" in name:
+            # 답변을 채운 질문서면 답변을 반영하고 '질문서' 폴더에 둔다
+            from . import questions
+            try:
+                n, _ = questions.import_answers(store, e["id"], data, today)
+            except Exception:  # noqa: BLE001 - 질문서 양식이 아니면 일반 첨부로 저장
+                n = None
+            if n is not None:
+                saved = filing.save_file(store, e, cfg, name, data=data, subject=subject, received_on=today,
+                                         source=f"메일 {sender} (질문서 답변 {n}건)", category="질문서")
+                files.append(saved)
+                continue
         files.append(filing.save_file(store, e, cfg, name, data=data, subject=subject, received_on=today,
                                       source=f"메일 {sender}"))
     links = big_file_links(_body_text(msg))

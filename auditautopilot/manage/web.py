@@ -20,12 +20,15 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, confirmations, filing, mailbox, mailer, nicebiz, pbc, schedule
+from . import config, confirmations, filing, mailbox, mailer, nicebiz, pbc, questions, schedule
 from .db import KINDS, STATUSES, Store
 
 MAX_UPLOAD = 300 * 1024 * 1024
 STATUS_COLOR = {"미요청": "#8a8f98", "요청": "#2f6fdf", "일부수령": "#c07a00", "수령": "#1d8a4e",
-                "검토완료": "#11613a", "보완요청": "#c2362b", "해당없음": "#b5b9c0"}
+                "검토완료": "#11613a", "보완요청": "#c2362b", "해당없음": "#b5b9c0",
+                # 질문서
+                "작성": "#8a8f98", "승인대기": "#c07a00", "승인": "#2f6fdf", "발송": "#6a4fc7",
+                "답변받음": "#1d8a4e", "종결": "#11613a"}
 
 CSS = """
 :root{--bg:#f6f7f9;--card:#fff;--ink:#1d2330;--mute:#677083;--line:#e2e5ea;--accent:#2f6fdf;--warn:#c2362b}
@@ -196,6 +199,16 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/confirm/project", "confirm_project"),
         ("POST", r"/e/(\d+)/confirm/materiality", "confirm_materiality"),
         ("GET", r"/e/(\d+)/confirm\.xlsx", "confirm_xlsx"),
+        ("POST", r"/e/(\d+)/questions", "question_add"),
+        ("POST", r"/e/(\d+)/questions/act", "question_act"),
+        ("POST", r"/e/(\d+)/questions/(\d+)", "question_edit"),
+        ("POST", r"/e/(\d+)/questions/from-confirm", "question_from_confirm"),
+        ("POST", r"/e/(\d+)/questions/answers", "question_answers"),
+        ("GET", r"/e/(\d+)/questions\.xlsx", "question_xlsx"),
+        ("GET", r"/e/(\d+)/questions/mail", "question_mail"),
+        ("GET", r"/e/(\d+)/questions/mail\.eml", "question_eml"),
+        ("POST", r"/e/(\d+)/questions/mail/send", "question_send"),
+        ("POST", r"/e/(\d+)/questions/mail/sent", "question_mark_sent"),
         ("POST", r"/e/(\d+)/files/(\d+)", "refile"),
         ("GET", r"/e/(\d+)/pbc\.xlsx", "pbc_xlsx"),
         ("GET", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)", "mail_preview"),
@@ -452,6 +465,7 @@ class Handler(BaseHTTPRequestHandler):
 <table style="margin-top:10px"><tr><th>받은 날</th><th>원본 파일명</th><th>저장 위치</th><th>요청 항목</th></tr>
 {''.join(frows) or '<tr><td colspan=4 class=mute>아직 없습니다.</td></tr>'}</table></div>
 {self._confirm_card(e, cfg)}
+{self._question_card(e, cfg)}
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
 <button class="ghost" style="color:var(--warn);border-color:var(--warn)">감사 건 삭제</button></form>"""
         self._send(page(f"{e['client_name']} {e['fiscal_year']} {e['kind']}", body, *self._flash()))
@@ -560,6 +574,170 @@ class Handler(BaseHTTPRequestHandler):
 <input type="file" name="files" multiple accept=".xlsx"><button class="ghost">장부와 함께 대사표 만들기</button></form>
 <p class="mute">더존 재무상태표·거래처원장을 고르면 위에서 가져온 회신현황과 합쳐 발송금액을 장부 잔액과 맞춰 보고 계정별 조회 비율을 낸 대사표를 내려받습니다.
 사이트에서 직접 받은 회신현황 엑셀을 함께 골라도 됩니다.</p></div>"""
+
+    # ── 질문서 ────────────────────────────────────────
+    def _question_card(self, e, cfg) -> str:
+        eid = e["id"]
+        qs = questions.all_(self.store, eid)
+        counts = {s: sum(1 for q in qs if q["status"] == s) for s in questions.STATES}
+        rows = []
+        for q in qs:
+            editable = q["status"] in questions.EDITABLE
+            fid = f"q{q['id']}"
+            if editable:
+                qcell = (f"<form id='{fid}' method='post' action='/e/{eid}/questions/{q['id']}'></form>"
+                         f"<textarea form='{fid}' name='question' rows='2' style='width:100%;min-width:280px'>{esc(q['question'])}</textarea>")
+                acc = f"<input form='{fid}' name='account' value='{esc(q['account'])}' style='width:90px'>"
+                amount_txt = "" if q["amount"] is None else f"{q['amount']:,.0f}"
+                amt = (f"<input form='{fid}' name='amount' value='{amount_txt}' style='width:110px'>"
+                       f"<button form='{fid}' class='ghost' style='margin-top:4px'>저장</button>")
+            else:
+                qcell = esc(q["question"])
+                acc = esc(q["account"])
+                amt = "" if q["amount"] is None else f"{q['amount']:,.0f}"
+            who = f"<br><span class='mute'>{esc(q['approved_by'] or '')} {esc(q['approved_on'] or '')}</span>" if q["approved_on"] else ""
+            ans = esc(q["answer"]) if q["answer"] else "<span class='mute'>-</span>"
+            rows.append(f"<tr><td><input type='checkbox' name='ids' value='{q['id']}' form='qact'></td><td>{esc(q['code'])}</td>"
+                        f"<td>{acc}</td><td>{qcell}</td><td style='text-align:right'>{amt}</td>"
+                        f"<td>{pill(q['status'])}{who}</td><td>{ans}</td></tr>")
+        table = ("<table><tr><th></th><th>번호</th><th>계정</th><th>질문</th><th>금액</th><th>상태</th><th>답변</th></tr>"
+                 + "".join(rows) + "</table>") if rows else "<p class='mute'>아직 질문이 없습니다.</p>"
+        summary = " · ".join(f"{s} {n}" for s, n in counts.items() if n)
+        n_ok = counts["승인"]
+        mail_btn = (f"<a class='btn' href='/e/{eid}/questions/mail'>승인한 질문 {n_ok}건 메일 미리보기</a>" if n_ok
+                    else "<span class='mute'>승인한 질문이 있으면 메일로 보낼 수 있습니다.</span>")
+        return f"""<div class="card" id="questions"><h2 style="margin-top:0">질문서</h2>
+<p>{summary or ''}</p>
+<form id="qact" method="post" action="/e/{eid}/questions/act" class="row">
+<button name="action" value="submit" class="ghost">승인 요청</button>
+<button name="action" value="approve">승인</button>
+<button name="action" value="revert" class="ghost">작성으로 되돌리기</button>
+<button name="action" value="close" class="ghost">종결</button>
+<button name="action" value="delete" class="ghost" onclick="return confirm('고른 질문을 지웁니다 (작성·승인대기 상태만).')">지우기</button>
+<span class="mute">표에서 고른 질문에 적용</span></form>
+<div style="margin-top:8px">{table}</div>
+<p class="row" style="margin-top:10px">{mail_btn}
+<a class="btn ghost" href="/e/{eid}/questions.xlsx">질문서 엑셀</a></p>
+<form method="post" action="/e/{eid}/questions" class="row" style="margin-top:10px">
+<label>계정<input name="account" style="width:110px"></label>
+<label style="flex:1">질문<textarea name="question" rows="2" style="width:100%" required></textarea></label>
+<label>금액<input name="amount" style="width:120px"></label><button class="ghost">질문 추가</button></form>
+<div class="row" style="margin-top:10px">
+<form method="post" action="/e/{eid}/questions/from-confirm"><button class="ghost">채권채무 조회 불일치·미회신으로 초안 만들기</button></form>
+<form method="post" action="/e/{eid}/questions/answers" enctype="multipart/form-data" class="row">
+<input type="file" name="files" accept=".xlsx"><button class="ghost">답변 엑셀 반영</button></form></div>
+<p class="mute">승인한 질문만 보낼 수 있습니다. 승인자는 설정의 작성자({esc(cfg.get('author') or '미입력')})로 기록됩니다. 보낸 뒤 회사가 답변 칸을 채운 엑셀을 올리면 답변이 들어갑니다.</p></div>"""
+
+    @staticmethod
+    def _amount(v: str | None):
+        raw = (v or "").replace(",", "").replace("원", "").strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ValueError("금액은 숫자로 넣어 주세요.") from exc
+
+    def question_add(self, eid):
+        f, _ = self._form()
+        e = self._eng(eid)
+        questions.add(self.store, e["id"], f.get("question", ""), f.get("account", ""), self._amount(f.get("amount")),
+                      "직접 입력", self.app.today())
+        self._redirect(f"/e/{eid}#questions", "질문을 추가했습니다.")
+
+    def question_edit(self, eid, qid):
+        f, _ = self._form()
+        self._eng(eid)
+        questions.edit(self.store, int(qid), question=f.get("question"), account=f.get("account"),
+                       amount=self._amount(f.get("amount")))
+        self._redirect(f"/e/{eid}#questions", "질문을 고쳤습니다.")
+
+    def question_act(self, eid):
+        f, _ = self._form()
+        e = self._eng(eid)
+        ids = [int(x) for x in f.get("ids[]", [])]
+        if not ids:
+            raise ValueError("표에서 질문을 먼저 고르세요.")
+        action = f.get("action", "")
+        by = self.app.cfg().get("author") or ""
+        if action == "approve" and not by:
+            raise ValueError("설정에서 작성자(승인자 이름)를 먼저 넣어 주세요.")
+        done, skipped = questions.act(self.store, [i for i in ids if (questions.get(self.store, i) or {}).get("engagement_id") == e["id"]],
+                                      action, by, self.app.today())
+        msg = f"{done}건 처리했습니다."
+        if skipped:
+            msg += f" 상태가 맞지 않아 건너뜀: {', '.join(skipped)}"
+        self._redirect(f"/e/{eid}#questions", msg)
+
+    def question_from_confirm(self, eid):
+        e = self._eng(eid)
+        n = questions.from_confirmations(self.store, e, self.app.today())
+        self._redirect(f"/e/{eid}#questions", f"질문 초안 {n}건을 만들었습니다." if n else "새로 만들 질문이 없습니다 (이미 만들었거나 모두 일치).")
+
+    def question_answers(self, eid):
+        e = self._eng(eid)
+        _, files = self._form()
+        if not files:
+            raise ValueError("답변을 채운 질문서 엑셀을 고르세요.")
+        total, missing = 0, []
+        for name, data in files:
+            n, miss = questions.import_answers(self.store, e["id"], data, self.app.today())
+            total += n
+            missing += miss
+            filing.save_file(self.store, e, self.app.cfg(), name, data=data, received_on=self.app.today(),
+                             source="질문서 답변", category="질문서")
+        msg = f"답변 {total}건을 반영했습니다."
+        if missing:
+            msg += f" 없는 질문 번호: {', '.join(missing)}"
+        self._redirect(f"/e/{eid}#questions", msg)
+
+    def question_xlsx(self, eid):
+        e = self._eng(eid)
+        self._download(questions.xlsx_bytes(e, questions.all_(self.store, e["id"])),
+                       f"{e['client_name']}_{e['kind']}_질문서.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
+
+    def question_mail(self, eid):
+        e, cfg = self._eng(eid), self.app.cfg()
+        d = questions.draft(self.store, e, cfg, self.app.today())
+        sender = mailbox.sender_for(cfg, e)
+        send_btn = (f'<form method="post" action="/e/{eid}/questions/mail/send" style="display:inline" '
+                    f'onsubmit="return confirm({esc(json.dumps(f"{sender} 계정으로 {d.to} 에게 질문 {len(d.ids)}건을 지금 보냅니다.", ensure_ascii=False))})">'
+                    f'<button>지금 보내기</button></form> ' if cfg["mail_accounts"] and d.to else "")
+        body = f"""<div class="card"><p><b>받는 사람</b> {esc(d.to) or '<span class=warn>회사 담당자 이메일이 없습니다</span>'}
+{f' · <b>참조</b> {esc(d.cc)}' if d.cc else ''}</p><p><b>제목</b> {esc(d.subject)}</p><pre>{esc(d.body)}</pre>
+<p class="mute">첨부: {esc(e['client_name'])}_{esc(e['kind'])}_질문서.xlsx (승인한 질문 {len(d.ids)}건, 답변 칸 포함)</p>
+<p>{send_btn}<a class="btn ghost" href="/e/{eid}/questions/mail.eml">아웃룩으로 열기 (.eml)</a>
+<form method="post" action="/e/{eid}/questions/mail/sent" style="display:inline"><button class="ghost">보냄으로 표시</button></form></p>
+<p class="mute">보낸 뒤에는 질문 상태가 '발송'으로 바뀝니다. 아웃룩으로 보냈다면 [보냄으로 표시]를 눌러 주세요.</p></div>
+<p><a href="/e/{eid}#questions">← 감사 건으로</a></p>"""
+        self._send(page("질문서 메일", body, *self._flash()))
+
+    def question_eml(self, eid):
+        e, cfg = self._eng(eid), self.app.cfg()
+        d = questions.draft(self.store, e, cfg, self.app.today())
+        if not d.to:
+            raise ValueError("회사 담당자 이메일이 없습니다. 회사 화면에서 넣어 주세요.")
+        msg = questions.message(self.store, e, cfg, d, mailbox.sender_for(cfg, e) or cfg.get("sender_email", ""))
+        self._download(mailer.eml_bytes(msg), f"{e['client_name']}_질문서.eml", "message/rfc822")
+
+    def question_send(self, eid):
+        e, cfg = self._eng(eid), self.app.cfg()
+        d = questions.draft(self.store, e, cfg, self.app.today())
+        if not d.to:
+            raise ValueError("회사 담당자 이메일이 없습니다.")
+        try:
+            mailbox.send(cfg, questions.message(self.store, e, cfg, d), mailbox.sender_for(cfg, e))
+        except (OSError, mailbox.smtplib.SMTPException) as exc:
+            raise ValueError(f"보내지 못했습니다: {exc}") from exc
+        questions.mark_sent(self.store, d.ids, self.app.today())
+        self.app.note([f"질문서 보냄: {e['client_name']} {len(d.ids)}건 → {d.to}"])
+        self._redirect(f"/e/{eid}#questions", f"질문 {len(d.ids)}건을 보냈습니다.")
+
+    def question_mark_sent(self, eid):
+        e, cfg = self._eng(eid), self.app.cfg()
+        d = questions.draft(self.store, e, cfg, self.app.today())
+        questions.mark_sent(self.store, d.ids, self.app.today())
+        self._redirect(f"/e/{eid}#questions", f"질문 {len(d.ids)}건을 보냄으로 표시했습니다.")
 
     def confirm_fetch(self, eid):
         e, cfg = self._eng(eid), self.app.cfg()
@@ -864,6 +1042,8 @@ class Handler(BaseHTTPRequestHandler):
 {{현장감사 시작일}} {{현장감사 종료일}} {{제출기한}} {{미제출 건수}} {{D-n}} {{감사코드}} {{요청 자료 표}} {{미제출 자료 표}}</p>
 {inp('request_subject', '최초 요청 제목', style='width:100%')}{area('request_body', '최초 요청 본문', 12)}
 {inp('reminder_subject', '독촉 제목', style='width:100%')}{area('reminder_body', '독촉 본문', 9)}{area('dday_body', '당일 본문', 7)}
+{inp('question_subject', '질문서 제목', style='width:100%')}{area('question_body', '질문서 본문 ({{질문 표}} {{질문 건수}} {{회신기한}} 사용 가능)', 10)}
+{inp('question_due_days', '질문서 회신기한 (보낸 날 + n일)', type='number', style='width:80px')}
 </div><p><button>설정 저장</button></p></form>{self._mail_settings(cfg)}{self._nice_settings(cfg)}"""
         self._send(page("설정", body, *self._flash()))
 
@@ -938,10 +1118,10 @@ for(const k of ['imap_host','imap_port','smtp_host','smtp_port'])$(k).value=a[k]
         cfg = self.app.cfg()
         new = {}
         for k in ("firm_name", "author", "contact", "sender_email", "root", "folder_rule", "request_subject",
-                  "request_body", "reminder_subject", "reminder_body", "dday_body"):
+                  "request_body", "reminder_subject", "reminder_body", "dday_body", "question_subject", "question_body"):
             if k in f:
                 new[k] = f[k].replace("\r\n", "\n").strip()
-        for k in ("request_offset", "reminder_from", "due_offset"):
+        for k in ("request_offset", "reminder_from", "due_offset", "question_due_days"):
             if k in f:
                 v = int(f[k])
                 if not 0 <= v <= 60:
