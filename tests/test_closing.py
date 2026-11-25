@@ -146,3 +146,19 @@ def test_web_notes_upload_and_fs(adjusted, tmp_path, server, store):  # noqa: F8
     data, hdr = _multipart([], [("notes", "엉뚱.xlsx", adjusted.read_bytes())])
     st, h, _ = _open(base + f"/e/{eid}/notes-filled", data, hdr)
     assert st == 303 and "err=" in h["Location"]
+
+
+def test_tabs_and_progress(adjusted, server, store):  # noqa: F811
+    base, _ = server
+    cid = store.add_client("C015", "가나상사", "김담당", "kim@example.com")
+    eid = store.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
+    page = _open(base + f"/e/{eid}")[2].decode()
+    for k in ("mail", "pbc", "files", "questions", "confirm", "lead", "close"):
+        assert f"id='tab-{k}'" in page and f"href='#tab-{k}'" in page
+    assert page.count("class='no'") == 7 and "진행 0/7" in page
+    store.set_setting(f"leadsheet:{eid}", {"made_at": "x", "path": str(adjusted), "lines": []})
+    store.set_setting(f"adjust:{eid}", {"made_at": "x", "path": str(adjusted), "lines": []})
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "진행 1/7" in page and "주석 자료를 아직 안 받음" in page
+    home = _open(base + "/")[2].decode()
+    assert "ministeps" in home and f"/e/{eid}#tab-close" in home
