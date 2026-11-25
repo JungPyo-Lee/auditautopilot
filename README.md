@@ -47,13 +47,13 @@ python -m auditautopilot materiality 재무제표등.xlsx --benchmark 매출액 
 # 분석적 검토: 수행중요성 이상이면서 10% 이상 변동한 계정
 python -m auditautopilot analytics 재무제표등.xlsx -o 분석적검토.xlsx --threshold-amount 858395000
 
+# 표본: 외상매출금(108) 거래처 잔액에서 10억 이상 전수 + 나머지 MUS 25건
+python -m auditautopilot sample 재무제표등.xlsx --account 108 --threshold 1000000000 --method mus --n 25 -o 표본.xlsx
+
 # 더존: 재무상태표·손익계산서·거래처원장·분개장을 함께 주면 종류를 알아서 맞춘다
 python -m auditautopilot import douzone 재무상태표과목별.xlsx 손익계산서과목별.xlsx "거래처원장 (1).xlsx" -o 정리.xlsx
 python -m auditautopilot analytics 재무상태표과목별.xlsx 손익계산서과목별.xlsx -o 분석적검토.xlsx --threshold-amount 266196000
 python -m auditautopilot sample 재무상태표과목별.xlsx "거래처원장 (1).xlsx" --account 외상매출금 --threshold 500000000 -o 표본.xlsx
-
-# 표본: 외상매출금(108) 거래처 잔액에서 10억 이상 전수 + 나머지 MUS 25건
-python -m auditautopilot sample 재무제표등.xlsx --account 108 --threshold 1000000000 --method mus --n 25 -o 표본.xlsx
 ```
 
 ## 지원하는 파일 형식

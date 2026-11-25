@@ -1,5 +1,10 @@
 """명령줄 실행 진입점.
 
+더존 자료는 파일 여러 개를 함께 주면 종류를 알아서 맞춘다.
+  python -m auditautopilot import douzone 재무상태표.xlsx 손익계산서.xlsx 거래처원장*.xlsx -o 정리.xlsx
+  python -m auditautopilot analytics 재무상태표.xlsx 손익계산서.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
+  python -m auditautopilot sample 재무상태표.xlsx "거래처원장 (1).xlsx" --account 외상매출금 -o 표본.xlsx
+
 예)
   python -m auditautopilot workpaper prepare 조서.xlsx -o 조서_작업용.xlsx --assignee 이정표
   python -m auditautopilot workpaper print-copy 조서.xlsx -o 조서_인쇄용.xlsx
@@ -8,11 +13,6 @@
   python -m auditautopilot materiality --benchmark 매출액 --amount 18669084279 --overall-pct 1
   python -m auditautopilot analytics 재무제표등.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
   python -m auditautopilot sample 재무제표등.xlsx --account 108 --method mus --n 25 -o 표본.xlsx
-
-더존 자료는 파일 여러 개를 함께 주면 종류를 알아서 맞춘다.
-  python -m auditautopilot import douzone 재무상태표.xlsx 손익계산서.xlsx 거래처원장*.xlsx -o 정리.xlsx
-  python -m auditautopilot analytics 재무상태표.xlsx 손익계산서.xlsx -o 분석적검토.xlsx --threshold-amount 300000000
-  python -m auditautopilot sample 재무상태표.xlsx "거래처원장 (1).xlsx" --account 외상매출금 -o 표본.xlsx
 """
 
 from __future__ import annotations
