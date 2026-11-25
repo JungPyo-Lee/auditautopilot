@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, confirmations, filing, mailbox, mailer, nicebiz, pbc, questions, schedule
+from . import auto_questions, config, confirmations, filing, mailbox, mailer, nicebiz, pbc, questions, schedule
 from .db import KINDS, STATUSES, Store
 
 MAX_UPLOAD = 300 * 1024 * 1024
@@ -209,6 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/questions/act", "question_act"),
         ("POST", r"/e/(\d+)/questions/(\d+)", "question_edit"),
         ("POST", r"/e/(\d+)/questions/from-confirm", "question_from_confirm"),
+        ("POST", r"/e/(\d+)/questions/auto", "question_auto"),
         ("POST", r"/e/(\d+)/questions/answers", "question_answers"),
         ("GET", r"/e/(\d+)/questions\.xlsx", "question_xlsx"),
         ("GET", r"/e/(\d+)/questions/mail", "question_mail"),
@@ -781,6 +782,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 <form method="post" action="/e/{eid}/questions/from-confirm"><button class="ghost">채권채무 조회 불일치·미회신으로 초안 만들기</button></form>
 <form method="post" action="/e/{eid}/questions/answers" enctype="multipart/form-data" class="row">
 <input type="file" name="files" accept=".xlsx"><button class="ghost">답변 엑셀 반영</button></form></div>
+{self._auto_question_form(e)}
 <p class="mute">승인한 질문만 보낼 수 있습니다. 승인자는 설정의 작성자({esc(cfg.get('author') or '미입력')})로 기록됩니다. 보낸 뒤 회사가 답변 칸을 채운 엑셀을 올리면 답변이 들어갑니다.</p></div>"""
 
     @staticmethod
@@ -822,6 +824,62 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         msg = f"{done}건 처리했습니다."
         if skipped:
             msg += f" 상태가 맞지 않아 건너뜀: {', '.join(skipped)}"
+        self._redirect(f"/e/{eid}#questions", msg)
+
+    def _auto_question_form(self, e) -> str:
+        eid = e["id"]
+        mat = confirmations.materiality(self.store, eid)
+        rec = self.store.get_setting(f"autoq:{eid}")
+        last = ""
+        if rec:
+            lines = "".join(f"<li>{esc(x)}</li>" for x in rec.get("notes", []))
+            last = f"<p class='mute'>{esc(rec.get('made_at', ''))} 만든 초안 (표본 시드 {esc(rec.get('seed'))})</p><ul class='mute'>{lines}</ul>"
+        return f"""<form method="post" action="/e/{eid}/questions/auto" enctype="multipart/form-data" class="row" style="margin-top:10px">
+<label>회사 자료 (여러 개)<input type="file" name="files" multiple accept=".xlsx" required></label>
+<label>중요성 금액<input name="materiality" value="{'' if mat is None else f'{mat:,.0f}'}" style="width:140px"></label>
+<label>표본 시드<input name="seed" style="width:90px" placeholder="자동"></label>
+<button class="ghost">장부로 증감분석 질문 초안 만들기</button></form>
+<p class="mute">재무상태표·손익계산서(전기 금액 포함), 분개장, 거래처원장(또는 세무사랑 묶음 파일)을 고르면
+① 중요성 금액 이상 증감한 계정 ② 전기·당기 같은 금액인 매출채권·대손충당금 ③ 매출원가율 {auto_questions.COST_RATIO_PP:g}%p 이상 변동
+④ 분개장의 특이분개(최대 {auto_questions.JE_MAX}건) ⑤ 매출·매입전표 표본 {auto_questions.SAMPLE_N}건씩 증빙 요청을 '작성' 상태로 넣습니다.
+이미 만든 질문은 다시 넣지 않습니다.</p>{last}"""
+
+    def question_auto(self, eid):
+        import tempfile
+        from datetime import datetime
+
+        from ..importers import books as books_mod
+
+        e = self._eng(eid)
+        f, files = self._form()
+        if not files:
+            raise ValueError("회사 자료 파일을 고르세요.")
+        mat = self._amount(f.get("materiality"))
+        if mat is None:
+            mat = confirmations.materiality(self.store, e["id"])
+        if not mat:
+            raise ValueError("중요성 금액을 넣어 주세요.")
+        raw_seed = (f.get("seed") or "").strip()
+        if raw_seed and not raw_seed.isdigit():
+            raise ValueError("표본 시드는 숫자로 넣어 주세요.")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, (name, data) in enumerate(files):
+                if not name.lower().endswith(".xlsx"):
+                    raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+                d = Path(tmp) / f"{i:02d}"
+                d.mkdir()
+                p = d / Path(name).name
+                p.write_bytes(data)
+                paths.append(p)
+            bk = books_mod.load(paths)
+        have = {q["source"] for q in questions.all_(self.store, e["id"])}
+        plan = auto_questions.build(bk, mat, int(raw_seed) if raw_seed else None, have)
+        added, skipped = auto_questions.apply(self.store, e["id"], plan, self.app.today())
+        self.store.set_setting(f"autoq:{e['id']}", {
+            "made_at": datetime.now().replace(microsecond=0).isoformat(" "), "seed": plan.seed,
+            "notes": bk.notes + plan.notes})
+        msg = f"질문 초안 {added}건을 넣었습니다" + (f" (이미 있는 {skipped}건은 건너뜀)" if skipped else "") + "."
         self._redirect(f"/e/{eid}#questions", msg)
 
     def question_from_confirm(self, eid):
