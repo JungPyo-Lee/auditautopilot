@@ -35,6 +35,8 @@ header{background:#1d2330;color:#fff;padding:10px 20px;display:flex;gap:20px;ali
 header a{color:#cfd6e4}header b{color:#fff;margin-right:12px}main{max-width:1200px;margin:0 auto;padding:20px}
 h1{font-size:20px;margin:4px 0 16px}h2{font-size:16px;margin:24px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+.card.alert{border:2px solid var(--warn);box-shadow:0 0 0 3px rgba(194,54,43,.12)}.badge-bad{display:inline-block;border:2px solid var(--warn);color:var(--warn);border-radius:6px;padding:0 6px;font-weight:600}
+.badge-ok{color:#1d7a3a}
 table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);
 vertical-align:top}th{font-weight:600;color:var(--mute);font-size:12px;background:#fafbfc}
 input,select,textarea{font:inherit;padding:5px 7px;border:1px solid #c9ced6;border-radius:5px;background:#fff}
@@ -192,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/confirm", "confirm_reconcile"),
         ("POST", r"/e/(\d+)/confirm/fetch", "confirm_fetch"),
         ("POST", r"/e/(\d+)/confirm/project", "confirm_project"),
+        ("POST", r"/e/(\d+)/confirm/materiality", "confirm_materiality"),
         ("GET", r"/e/(\d+)/confirm\.xlsx", "confirm_xlsx"),
         ("POST", r"/e/(\d+)/files/(\d+)", "refile"),
         ("GET", r"/e/(\d+)/pbc\.xlsx", "pbc_xlsx"),
@@ -261,6 +264,11 @@ class Handler(BaseHTTPRequestHandler):
         for e in self.store.engagements():
             nxt = next((p for p in schedule.plan(e, cfg) if p.on >= today
                         and not self.store.mail_sent(e["id"], p.kind, p.on)), None)
+            a = confirmations.assess(confirmations.latest(self.store, e["id"]),
+                                     confirmations.materiality(self.store, e["id"]),
+                                     float(cfg.get("confirm_min_reply_rate", 80)))
+            conf = ("-" if a is None else (f"<span class='badge-ok'>회신 {a['rate']}%</span>" if a["ok"]
+                    else f"<a href='/e/{e['id']}#confirm' class='badge-bad' title='{esc(' / '.join(a['reasons']))}'>회신 {a['rate']}%</a>"))
             done = e["total"] - e["outstanding"]
             pct = int(done / e["total"] * 100) if e["total"] else 0
             erows.append(
@@ -268,8 +276,8 @@ class Handler(BaseHTTPRequestHandler):
                 f"<td>{esc(e['fiscal_year'])} {esc(e['kind'])}</td>"
                 f"<td>{esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}</td>"
                 f"<td><div class='bar'><i style='width:{pct}%'></i></div><span class='mute'>{done}/{e['total']}</span></td>"
-                f"<td>{e['outstanding']}건</td><td>{esc(f'{nxt.on} {nxt.label}') if nxt else '-'}</td></tr>")
-        eng_html = ("<table><tr><th>회사</th><th>감사</th><th>현장감사</th><th>수령</th><th>미제출</th><th>다음 메일</th></tr>"
+                f"<td>{e['outstanding']}건</td><td>{conf}</td><td>{esc(f'{nxt.on} {nxt.label}') if nxt else '-'}</td></tr>")
+        eng_html = ("<table><tr><th>회사</th><th>감사</th><th>현장감사</th><th>수령</th><th>미제출</th><th>채권채무 조회</th><th>다음 메일</th></tr>"
                     + "".join(erows) + "</table>") if erows else (
             '<p class="mute">등록된 감사가 없습니다. <a href="/clients">회사</a>를 먼저 등록하고 '
             '<a href="/engagements/new">감사를 등록</a>하세요.</p>')
@@ -516,6 +524,21 @@ class Handler(BaseHTTPRequestHandler):
         else:
             top = ("<p>설정 &gt; <a href='/settings#nice'>전자조회 계정</a>에 아이디·비밀번호를 넣으면 "
                    "사이트에서 회신현황을 바로 가져옵니다.</p>")
+        mat = confirmations.materiality(self.store, eid)
+        a = confirmations.assess(rec, mat, float(cfg.get("confirm_min_reply_rate", 80)))
+        mat_form = (f"<form method='post' action='/e/{eid}/confirm/materiality' class='row' style='margin-top:8px'>"
+                    f"<label>중요성 금액 (미회신 금액 판정 기준)<input name='materiality' value='{'' if mat is None else f'{mat:,.0f}'}' "
+                    f"placeholder='예: 354,929,000' style='width:160px'></label><button class='ghost'>저장</button>"
+                    f"<span class='mute'>회신률 기준 {float(cfg.get('confirm_min_reply_rate', 80)):g}% (설정에서 바꿈)</span></form>")
+        verdict = ""
+        if a:
+            if a["ok"]:
+                verdict = (f"<p class='badge-ok'>기준 충족: 회신률 {a['rate']}% ({a['replied']}/{a['total']}건), "
+                           f"미회신 금액 {a['noreply_amount']:,.0f}원</p>")
+            else:
+                verdict = "<p><span class='badge-bad'>확인 필요</span> " + " / ".join(esc(r) for r in a["reasons"]) + "</p>"
+            if a["notes"]:
+                verdict += "<p class='mute'>" + " · ".join(esc(n) for n in a["notes"]) + "</p>"
         result = "<p class='mute'>아직 가져온 결과가 없습니다.</p>"
         if rec:
             c = rec.get("counts", {})
@@ -529,9 +552,10 @@ class Handler(BaseHTTPRequestHandler):
                       f"<a class='btn ghost' href='/e/{eid}/confirm.xlsx'>대사표 내려받기</a></p>"
                       f"<table><tr><th>계정</th><th>건수</th><th>일치</th><th>불일치</th><th>미회신</th><th>발송금액(원화)</th></tr>"
                       f"{rows}</table>")
-        return f"""<div class="card" id="confirm"><h2 style="margin-top:0">채권채무 조회 (전자조회)</h2>
-{top}
-<div style="margin-top:10px">{result}</div>
+        alert = " alert" if a and not a["ok"] else ""
+        return f"""<div class="card{alert}" id="confirm"><h2 style="margin-top:0">채권채무 조회 (전자조회)</h2>
+{top}{mat_form}
+<div style="margin-top:10px">{verdict}{result}</div>
 <form method="post" action="/e/{eid}/confirm" enctype="multipart/form-data" class="row" style="margin-top:10px">
 <input type="file" name="files" multiple accept=".xlsx"><button class="ghost">장부와 함께 대사표 만들기</button></form>
 <p class="mute">더존 재무상태표·거래처원장을 고르면 위에서 가져온 회신현황과 합쳐 발송금액을 장부 잔액과 맞춰 보고 계정별 조회 비율을 낸 대사표를 내려받습니다.
@@ -547,6 +571,22 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"전자조회 사이트에 연결하지 못했습니다: {exc}") from exc
         c = rec["counts"]
         self._redirect(f"/e/{eid}#confirm", f"전자조회에서 가져왔습니다: 일치 {c['일치']}, 불일치 {c['불일치']}, 미회신 {c['미회신']}")
+
+    def confirm_materiality(self, eid):
+        f, _ = self._form()
+        e = self._eng(eid)
+        raw = (f.get("materiality") or "").replace(",", "").replace("원", "").strip()
+        if raw:
+            try:
+                v = float(raw)
+            except ValueError as exc:
+                raise ValueError("중요성 금액은 숫자로 넣어 주세요.") from exc
+            if v <= 0:
+                raise ValueError("중요성 금액은 0보다 커야 합니다.")
+        else:
+            v = None
+        confirmations.set_materiality(self.store, e["id"], v)
+        self._redirect(f"/e/{eid}#confirm", "중요성 금액을 저장했습니다." if v else "중요성 금액을 지웠습니다.")
 
     def confirm_project(self, eid):
         f, _ = self._form()
@@ -565,7 +605,15 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("먼저 전자조회에서 가져오거나 회신현황 엑셀을 올려 주세요.")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.xlsx"
-            write_excel(out, confirm.build(paths).sheets())
+            res = confirm.build(paths)
+            a = confirmations.assess(confirmations.latest(self.store, e["id"]),
+                                     confirmations.materiality(self.store, e["id"]),
+                                     float(self.app.cfg().get("confirm_min_reply_rate", 80)))
+            if a:
+                res.notes = ([("기준 충족: " if a["ok"] else "확인 필요: ")
+                              + (" / ".join(a["reasons"]) or f"회신률 {a['rate']}%, 미회신 금액 {a['noreply_amount']:,.0f}원")]
+                             + a["notes"] + res.notes)
+            write_excel(out, res.sheets())
             data = out.read_bytes()
         self._download(data, f"{e['client_name']}_{e['fiscal_year']}_{e['kind']}_채권채무조회.xlsx",
                        mailer.XLSX[0] + "/" + mailer.XLSX[1])
@@ -730,6 +778,11 @@ class Handler(BaseHTTPRequestHandler):
         u = f.get("nice_user", "").strip()
         self.store.set_setting("nice_user", u)
         self.store.set_setting("nice_auto", f.get("nice_auto") == "1")
+        if f.get("confirm_min_reply_rate"):
+            rate = float(f["confirm_min_reply_rate"])
+            if not 0 < rate <= 100:
+                raise ValueError("회신률 기준은 0~100% 사이로 넣어 주세요.")
+            self.store.set_setting("confirm_min_reply_rate", rate)
         note = "전자조회 계정을 저장했습니다."
         if u and f.get("password"):
             note += " " + confirmations.set_password(u, f["password"], remember=f.get("remember") == "1")
@@ -825,6 +878,7 @@ class Handler(BaseHTTPRequestHandler):
 <label>아이디<input name="nice_user" value="{esc(u)}" autocomplete="username"></label>
 <label>비밀번호 {pw}<input name="password" type="password" autocomplete="current-password" placeholder="바꿀 때만 입력"></label>
 <label style="flex-direction:row;gap:4px"><input type="checkbox" name="remember" value="1">윈도우 자격 증명 관리자에 저장</label>
+<label>회신률 기준(%)<input name="confirm_min_reply_rate" type="number" min="1" max="100" step="1" value="{float(cfg.get('confirm_min_reply_rate', 80)):g}" style="width:80px"></label>
 <label style="flex-direction:row;gap:4px"><input type="checkbox" name="nice_auto" value="1" {'checked' if cfg.get('nice_auto') else ''}>하루 한 번 자동으로 가져오기</label>
 <button>저장</button></form>{test}
 <p class="mute">회계사 본인 아이디로 로그인합니다. 이용약관상 ID는 다른 사람과 같이 쓰면 안 되므로, 팀원은 각자 자기 PC에서 자기 아이디를 넣어 주세요.

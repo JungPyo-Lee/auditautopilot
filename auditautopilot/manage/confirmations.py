@@ -157,3 +157,38 @@ def fetch_all(store, cfg: dict, today: date | None = None, client_factory=nicebi
         except Exception as exc:  # noqa: BLE001 - 한 건이 실패해도 나머지는 계속
             log.append(f"전자조회 {e['client_name']} 실패: {exc}")
     return log
+
+
+def materiality(store, eid: int) -> float | None:
+    v = store.get_setting(f"materiality:{eid}")
+    return float(v) if v not in (None, "") else None
+
+
+def set_materiality(store, eid: int, amount: float | None) -> None:
+    store.set_setting(f"materiality:{eid}", amount)
+
+
+def assess(rec: dict | None, mat: float | None, min_rate: float = 80) -> dict | None:
+    """회신 상태가 기준을 채우는지 본다.
+    - 미회신 금액(원화 합계)이 중요성 금액 이하
+    - 회신률(회신 건수 ÷ 조회 건수)이 기준(기본 80%) 이상
+    하나라도 못 채우면 ok=False (화면에 빨간 테두리)."""
+    if not rec:
+        return None
+    c = rec.get("counts") or {}
+    total = sum(c.values())
+    replied = c.get(confirm.STATUS_OK, 0) + c.get(confirm.STATUS_DIFF, 0)
+    rate = round(replied / total * 100, 1) if total else 0.0
+    noreply = sum(s.get("미회신 금액(원화)", 0) or 0 for s in rec.get("summary") or [])
+    fx = sum(s.get("외화 건수", 0) or 0 for s in rec.get("summary") or [])
+    reasons, notes = [], []
+    if rate < min_rate:
+        reasons.append(f"회신률 {rate}% (기준 {min_rate:g}% 미달, {replied}/{total}건)")
+    if mat is None:
+        notes.append("중요성 금액을 넣으면 미회신 금액도 판정합니다")
+    elif noreply > mat:
+        reasons.append(f"미회신 금액 {noreply:,.0f}원 > 중요성 {mat:,.0f}원")
+    if fx:
+        notes.append(f"외화 {fx}건은 미회신 금액 합계에서 빠져 있습니다")
+    return {"ok": not reasons, "rate": rate, "replied": replied, "total": total, "noreply_amount": noreply,
+            "materiality": mat, "min_rate": min_rate, "reasons": reasons, "notes": notes}
