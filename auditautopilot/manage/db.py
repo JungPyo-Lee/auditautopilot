@@ -89,6 +89,24 @@ CREATE TABLE IF NOT EXISTS big_links (
   done INTEGER NOT NULL DEFAULT 0,
   UNIQUE (engagement_id, url)
 );
+CREATE TABLE IF NOT EXISTS questions (
+  id INTEGER PRIMARY KEY,
+  engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  account TEXT NOT NULL DEFAULT '',
+  question TEXT NOT NULL,
+  amount REAL,
+  source TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '작성',
+  created_on TEXT,
+  approved_by TEXT,
+  approved_on TEXT,
+  sent_on TEXT,
+  answer TEXT NOT NULL DEFAULT '',
+  answered_on TEXT,
+  note TEXT NOT NULL DEFAULT '',
+  UNIQUE(engagement_id, code)
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
