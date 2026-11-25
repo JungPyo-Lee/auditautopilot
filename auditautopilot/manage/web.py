@@ -202,6 +202,9 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/confirm\.xlsx", "confirm_xlsx"),
         ("POST", r"/e/(\d+)/leadsheet", "leadsheet_make"),
         ("GET", r"/e/(\d+)/leadsheet\.xlsx", "leadsheet_xlsx"),
+        ("GET", r"/e/(\d+)/aje-template\.xlsx", "aje_template"),
+        ("POST", r"/e/(\d+)/adjust", "adjust_make"),
+        ("GET", r"/e/(\d+)/adjusted\.xlsx", "adjusted_xlsx"),
         ("POST", r"/e/(\d+)/questions", "question_add"),
         ("POST", r"/e/(\d+)/questions/act", "question_act"),
         ("POST", r"/e/(\d+)/questions/(\d+)", "question_edit"),
@@ -596,7 +599,8 @@ class Handler(BaseHTTPRequestHandler):
 <p class="mute">더존 합계잔액시산표는 꼭 넣고, 재무상태표·손익계산서(과목별, 전기 금액용)와 거래처원장(잔액)을 함께 고르면
 TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거래처원장은 해당 ○1100 탭에 거래처별 명세로 들어갑니다.
 거래처원장이 어느 계정인지는 잔액으로 찾고, 못 찾으면 파일 이름을 계정명으로 바꿔 올려 주세요 (예: 미지급금.xlsx).
-회사가 준 시산표를 조서에 옮겨 적는 것이며 재무제표를 대신 작성하지 않습니다.</p>{last}</div>"""
+회사가 준 시산표를 조서에 옮겨 적는 것이며 재무제표를 대신 작성하지 않습니다.</p>{last}
+{self._adjust_part(e, rec)}</div>"""
 
     def leadsheet_make(self, eid):
         import tempfile
@@ -631,6 +635,88 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             "made_at": datetime.now().replace(microsecond=0).isoformat(" "), "path": str(saved["path"]),
             "lines": res.lines()})
         self._redirect(f"/e/{eid}#leadsheet", res.lines()[0])
+
+    def _adjust_part(self, e, lead_rec) -> str:
+        eid = e["id"]
+        rec = self.store.get_setting(f"adjust:{eid}")
+        last = ""
+        if rec:
+            lines = "".join(f"<li>{esc(x)}</li>" for x in rec.get("lines", []))
+            last = (f"<p>{esc(rec.get('made_at', ''))} 반영: <a class='btn ghost' href='/e/{eid}/adjusted.xlsx'>"
+                    f"{esc(Path(rec.get('path', '')).name)} 내려받기</a></p><ul class='mute'>{lines}</ul>")
+        tpl_btn = (f"<a class='btn ghost' href='/e/{eid}/aje-template.xlsx'>수정분개 양식 내려받기</a>" if lead_rec
+                   else "<span class='mute'>조서를 채우면 그 계정과목으로 수정분개 양식을 받을 수 있습니다.</span>")
+        return f"""<h3 id="adjust">수정분개 반영 (정산표·수정후 BS·IS·현금흐름정산표)</h3>
+<p>{tpl_btn}</p>
+<form method="post" action="/e/{eid}/adjust" enctype="multipart/form-data" class="row">
+<label>채운 수정분개<input type="file" name="aje" accept=".xlsx" required></label>
+<label>조서 (비우면 마지막으로 채운 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
+<button>수정분개 반영</button></form>
+<p class="mute">조서에 AJE·정산표·수정후BS·수정후IS·현금흐름정산표 탭을 더하고, 리드시트 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿉니다.
+모든 금액이 수식으로 이어져 있고 탭마다 검증 칸(0이어야 함)이 있습니다. 다시 올리면 그 탭들을 새로 만듭니다.</p>{last}"""
+
+    def _last_workpaper(self, e) -> Path:
+        rec = self.store.get_setting(f"leadsheet:{e['id']}") or {}
+        p = Path(rec.get("path") or "")
+        if not rec or not p.exists():
+            raise ValueError("먼저 [조서 채우기]를 해 주세요.")
+        return p
+
+    def aje_template(self, eid):
+        import tempfile
+
+        from ..workpaper import adjust
+
+        e = self._eng(eid)
+        wp = self._last_workpaper(e)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = adjust.aje_template(wp, Path(tmp) / "수정분개양식.xlsx")
+            data = out.read_bytes()
+        self._download(data, f"{e['client_name']}_수정분개양식.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
+
+    def adjust_make(self, eid):
+        import tempfile
+        from datetime import datetime
+
+        from ..workpaper import adjust
+
+        e, cfg = self._eng(eid), self.app.cfg()
+        f, files = self._form()
+        ai = (f.get("@aje") or [None])[0]
+        wi = (f.get("@workpaper") or [None])[0]
+        if ai is None:
+            raise ValueError("채운 수정분개 파일을 고르세요.")
+        with tempfile.TemporaryDirectory() as tmp:
+            def put(idx, sub):
+                name, data = files[idx]
+                if not name.lower().endswith(".xlsx"):
+                    raise ValueError(f"{name}: .xlsx 파일만 받습니다.")
+                d = Path(tmp) / sub
+                d.mkdir()
+                p = d / Path(name).name
+                p.write_bytes(data)
+                return p
+            aje = put(ai, "aje")
+            wp = put(wi, "wp") if wi is not None else self._last_workpaper(e)
+            stem = wp.stem.removesuffix("_수정분개반영")
+            out = Path(tmp) / "out" / f"{stem}_수정분개반영.xlsx"
+            res = adjust.apply(wp, aje, out)
+            saved = filing.save_file(self.store, e, cfg, out.name, data=out.read_bytes(), received_on=self.app.today(),
+                                     source="수정분개", category="조서")
+            filing.save_file(self.store, e, cfg, files[ai][0], data=files[ai][1], received_on=self.app.today(),
+                             source="수정분개", category="조서")
+        self.store.set_setting(f"adjust:{e['id']}", {
+            "made_at": datetime.now().replace(microsecond=0).isoformat(" "), "path": str(saved["path"]),
+            "lines": res.summary()})
+        self._redirect(f"/e/{eid}#adjust", res.summary()[0])
+
+    def adjusted_xlsx(self, eid):
+        e = self._eng(eid)
+        rec = self.store.get_setting(f"adjust:{e['id']}") or {}
+        p = Path(rec.get("path") or "")
+        if not rec or not p.exists():
+            raise ValueError("먼저 [수정분개 반영]을 해 주세요.")
+        self._download(p.read_bytes(), p.name, mailer.XLSX[0] + "/" + mailer.XLSX[1])
 
     def leadsheet_xlsx(self, eid):
         e = self._eng(eid)
