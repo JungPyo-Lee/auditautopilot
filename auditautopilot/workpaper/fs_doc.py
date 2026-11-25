@@ -1,7 +1,7 @@
 """재무제표·주석 초안 (워드 .docx).
 
 - 재무상태표·손익계산서·자본변동표·현금흐름표: 수정분개까지 반영한 정산표 금액 (조서의 수정후BS·수정후IS·
-  현금흐름정산표 탭과 같은 계산을 파이썬으로 한 값). 워드 표라 그대로 복사해 붙여 넣을 수 있다.
+  정산표-CF 탭과 같은 합계를 파이썬으로 계산한 값). 워드 표라 그대로 복사해 붙여 넣을 수 있다.
 - 주석: 회사가 채워 보낸 주석 자료 엑셀(주석 자료요청 양식)의 시트마다 주석 하나. 채운 파일이 없으면
   정산표 금액만 들어간 양식 내용으로 만들고, 회사가 채울 주석은 [ ]로 비워 둔다.
 
@@ -172,7 +172,7 @@ def equity_changes(figs: list[Figure], ni: float) -> tuple[list[str], list[list[
 # ---------------------------------------------------------------- 현금흐름표 (간접법)
 
 def cash_flow(figs: list[Figure], ni: float) -> tuple[list[Line], dict]:
-    """조서 현금흐름정산표 탭과 같은 계산."""
+    """간접법 현금흐름표 (조서 정산표-CF 탭과 활동별 합계가 같다)."""
     bs = [f for f in figs if f.row.side != "is" and f.row.major in BS_MAJORS]
     is_ = [f for f in figs if f.row.side == "is"]
     adj: dict[int, float] = {}

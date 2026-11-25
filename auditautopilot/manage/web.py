@@ -842,13 +842,13 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
                     f"{esc(Path(rec.get('path', '')).name)} 내려받기</a></p><ul class='mute'>{lines}</ul>")
         tpl_btn = (f"<a class='btn ghost' href='/e/{eid}/aje-template.xlsx'>수정분개 양식 내려받기</a>" if lead_rec
                    else "<span class='mute'>조서를 채우면 그 계정과목으로 수정분개 양식을 받을 수 있습니다.</span>")
-        return f"""<h3 id="adjust">수정분개 반영 (정산표·수정후 BS·IS·현금흐름정산표)</h3>
+        return f"""<h3 id="adjust">수정분개 반영 (정산표·정산표-CF·보고서 재무제표)</h3>
 <p>{tpl_btn}</p>
 <form method="post" action="/e/{eid}/adjust" enctype="multipart/form-data" class="row">
 <label>채운 수정분개 양식<input type="file" name="aje" accept=".xlsx" required></label>
 <label>다른 조서에 반영할 때만: 조서 파일 (비우면 마지막으로 채운 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
 <button>수정분개 반영</button></form>
-<p class="mute">조서에 AJE·정산표·수정후BS·수정후IS·현금흐름정산표 탭을 더하고, 리드시트 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿉니다.
+<p class="mute">조서에 AJE·정산표·수정후BS·수정후IS·정산표-CF·보고서 BS·보고서IS·자본변동표·보고서현금흐름표 탭을 더하고, 리드시트 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿉니다.
 모든 금액이 수식으로 이어져 있고 탭마다 검증 칸(0이어야 함)이 있습니다. 다시 올리면 그 탭들을 새로 만듭니다.</p>{last}
 {self._closing_part(e, rec)}"""
 
