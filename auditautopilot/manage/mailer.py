@@ -25,7 +25,7 @@ def pbc_xlsx_bytes(items: list[dict], sheet: str = "자료요청목록") -> byte
     import tempfile
     from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         p = write_excel(Path(d) / "pbc.xlsx", {sheet: pbc_rows(items)})
         return p.read_bytes()
 

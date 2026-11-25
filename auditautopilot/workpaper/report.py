@@ -19,6 +19,7 @@ from xml.sax.saxutils import escape
 import openpyxl
 
 from .adjust import Figure, figures
+from .xlsx_xml import open_workbook
 
 OPINIONS = ("적정", "한정", "부적정", "의견거절")
 
@@ -41,7 +42,7 @@ def _d(v) -> date | None:
 
 def read_info(workpaper: str | Path) -> Info:
     info = Info()
-    wb = openpyxl.load_workbook(workpaper, read_only=True, data_only=True)
+    wb = open_workbook(workpaper, read_only=True, data_only=True)
     try:
         if "일반사항" not in wb.sheetnames:
             return info

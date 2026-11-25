@@ -26,7 +26,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from ..importers.common import squash, to_number
 from .leadsheet import BS_SIDES, TARGETS, is_contra, read_template
-from .xlsx_xml import Formula, XlsxPackage, column_letter, grid_xml
+from .xlsx_xml import Formula, open_workbook, XlsxPackage, column_letter, grid_xml
 
 NEW_TABS = ("AJE", "정산표", "수정후BS", "수정후IS", "현금흐름정산표")
 AJE_HEADERS = ["번호", "일자", "구분", "계정과목", "차변", "대변", "적요", "근거 조서", "새 계정 묶음"]
@@ -118,7 +118,7 @@ def _group_key(major: str, label: str) -> str | None:
 def read_rows(workpaper: str | Path) -> tuple[object, list[TbRow]]:
     """리드시트까지 채운 조서의 TB 탭에서 계정 줄을 읽는다."""
     tpl = read_template(workpaper)
-    wb = openpyxl.load_workbook(workpaper, data_only=False)
+    wb = open_workbook(workpaper, data_only=False)
     try:
         tb = wb["TB"]
         out = []
@@ -221,7 +221,7 @@ def aje_template(workpaper: str | Path, output: str | Path) -> Path:
 
 
 def read_aje(path: str | Path) -> list[AjeLine]:
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    wb = open_workbook(path, read_only=True, data_only=True)
     try:
         ws = next((wb[n] for n in ("수정분개", "AJE") if n in wb.sheetnames), wb.worksheets[0])
         rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
@@ -726,7 +726,7 @@ def figures(workpaper: str | Path, aje_path: str | Path | None = None) -> tuple[
     aje_path가 없으면 조서 안 AJE 탭을 쓴다. 반환: (계정별 금액, 당기순이익, 참고)"""
     tpl, rows = read_rows(workpaper)
     notes: list[str] = []
-    wb = openpyxl.load_workbook(workpaper, read_only=True, data_only=True)
+    wb = open_workbook(workpaper, read_only=True, data_only=True)
     try:
         has_aje = "AJE" in wb.sheetnames
         bs_prior, is_prior = {}, {}
