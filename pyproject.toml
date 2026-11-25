@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auditautopilot"
+version = "0.1.0"
+description = "회계감사 중간·기말 업무 자동화 도구"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "openpyxl>=3.1",
+  "lxml>=4.9",
+  "xlrd>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+auditautopilot = "auditautopilot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["auditautopilot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
