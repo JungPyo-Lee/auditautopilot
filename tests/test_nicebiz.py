@@ -195,3 +195,63 @@ def test_web_fetch(site, store, monkeypatch):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_assess_thresholds():
+    rec = {"counts": {"일치": 7, "불일치": 1, "미회신": 2},
+           "summary": [{"미회신 금액(원화)": 300, "외화 건수": 0}, {"미회신 금액(원화)": 200, "외화 건수": 1}]}
+    a = confirmations.assess(rec, 1000, 80)
+    assert a["ok"] and a["rate"] == 80.0 and a["noreply_amount"] == 500 and "외화 1건" in a["notes"][0]
+    a = confirmations.assess(rec, 400, 80)                    # 미회신 금액이 중요성 초과
+    assert not a["ok"] and "중요성" in a["reasons"][0]
+    a = confirmations.assess(rec, 1000, 90)                   # 회신률 기준 미달
+    assert not a["ok"] and "회신률 80.0%" in a["reasons"][0]
+    a = confirmations.assess(rec, None, 80)                   # 중요성 미입력이면 건수만 본다
+    assert a["ok"] and "중요성 금액을 넣으면" in a["notes"][0]
+    assert confirmations.assess(None, 1000) is None
+
+
+def test_web_alert_border(site, store, monkeypatch):
+    from auditautopilot.manage.web import make_server
+
+    monkeypatch.setattr(nicebiz.Client.__init__, "__defaults__", (site, None, 30))
+    store.set_setting("nice_user", "cpa01")
+    confirmations.set_password("cpa01", "pw!")
+    e = store.engagements()[0]
+    confirmations.fetch(store, e, config.load(store), date(2026, 11, 25),
+                        client_factory=lambda: nicebiz.Client(base=site))   # 3건 중 2건 회신 = 66.7%
+    srv = make_server(store, "127.0.0.1", 0, today=lambda: date(2026, 11, 25))
+    port = srv.server_address[1]
+    srv.RequestHandlerClass.allowed_hosts = {f"127.0.0.1:{port}"}
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    op = urllib.request.build_opener(NoRedirect)
+
+    def post(path, data):
+        try:
+            return op.open(base + path, urllib.parse.urlencode(data).encode()).status
+        except urllib.error.HTTPError as err:
+            return err.code
+    try:
+        page = op.open(base + f"/e/{e['id']}").read().decode()
+        assert 'class="card alert" id="confirm"' in page and "회신률 66.7%" in page
+        assert "badge-bad" in op.open(base + "/").read().decode()
+        assert post("/settings/nice", {"nice_user": "cpa01", "confirm_min_reply_rate": "60"}) == 303
+        assert post(f"/e/{e['id']}/confirm/materiality", {"materiality": "1,000"}) == 303
+        assert confirmations.materiality(store, e["id"]) == 1000
+        page = op.open(base + f"/e/{e['id']}").read().decode()
+        assert 'class="card" id="confirm"' in page and "기준 충족" in page
+        assert post(f"/e/{e['id']}/confirm/materiality", {"materiality": "200"}) == 303   # 미회신 300 > 200
+        page = op.open(base + f"/e/{e['id']}").read().decode()
+        assert 'class="card alert"' in page and "미회신 금액 300원 &gt; 중요성 200원" in page
+        x = op.open(base + f"/e/{e['id']}/confirm.xlsx").read()
+        notes = [r[0] for r in openpyxl.load_workbook(io.BytesIO(x))["참고"].iter_rows(values_only=True)]
+        assert notes[1].startswith("확인 필요")
+    finally:
+        srv.shutdown()
+        srv.server_close()

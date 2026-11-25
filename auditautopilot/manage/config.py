@@ -57,7 +57,8 @@ DEFAULTS = {
     "categories": ["PBC", "조서", "채권채무조회", "금융기관조회", "질문서"],
     "unmatched_category": "미분류",
     "nice_user": "",          # 한공회 전자조회(NICE 감사지원) 아이디. 비밀번호는 저장하지 않거나 자격 증명 관리자에
-    "nice_auto": False,       # 켜면 하루 한 번(발송 시각 이후) 연결된 감사 건의 회신현황을 가져온다
+    "nice_auto": False,
+    "confirm_min_reply_rate": 80,   # 채권채무 조회 회신률(건수) 기준 %. 이보다 낮으면 경고       # 켜면 하루 한 번(발송 시각 이후) 연결된 감사 건의 회신현황을 가져온다
     "request_subject": REQUEST_SUBJECT,
     "request_body": REQUEST_BODY,
     "reminder_subject": REMINDER_SUBJECT,
