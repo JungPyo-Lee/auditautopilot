@@ -223,7 +223,7 @@ def aje_template(workpaper: str | Path, output: str | Path) -> Path:
 def read_aje(path: str | Path) -> list[AjeLine]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb["수정분개"] if "수정분개" in wb.sheetnames else wb.worksheets[0]
+        ws = next((wb[n] for n in ("수정분개", "AJE") if n in wb.sheetnames), wb.worksheets[0])
         rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
     finally:
         wb.close()
@@ -709,6 +709,56 @@ def _cf_sheet(st, rows: list[TbRow], bs: dict, is_: dict) -> tuple[bytes, dict]:
     g.put(f"B{r}", Formula(f"ROUND(({end_cash})-B{end},0)"), "check")
     g.put(f"C{r}", "0이 아니면 전기 금액이 빠졌거나(BS 탭 전기), 재무상태표 대차가 맞지 않는 것")
     return grid_xml(g.cells, [46, 18, 56], freeze="B5"), {"sections": sections, "check": r}
+
+
+# ---------------------------------------------------------------- 수정후 금액 (파이썬 계산)
+
+@dataclass
+class Figure:
+    row: TbRow
+    current: float       # 수정후 당기 (자산·비용은 차변-대변, 부채·자본·수익은 대변-차변)
+    prior: float | None  # 전기 (BS·IS 탭)
+    adjustment: float    # 수정분개 (같은 부호)
+
+
+def figures(workpaper: str | Path, aje_path: str | Path | None = None) -> tuple[list[Figure], float, list[str]]:
+    """수정분개까지 반영한 계정별 금액을 계산한다 (주석 자료 양식·감사보고서용).
+    aje_path가 없으면 조서 안 AJE 탭을 쓴다. 반환: (계정별 금액, 당기순이익, 참고)"""
+    tpl, rows = read_rows(workpaper)
+    notes: list[str] = []
+    wb = openpyxl.load_workbook(workpaper, read_only=True, data_only=True)
+    try:
+        has_aje = "AJE" in wb.sheetnames
+        bs_prior, is_prior = {}, {}
+        ws = wb["BS"]
+        for i, r in enumerate(ws.iter_rows(min_row=1, max_col=6, values_only=True), start=1):
+            bs_prior[i] = r[5] if len(r) > 5 else None
+        for r in wb["IS"].iter_rows(min_row=1, max_col=6, values_only=True):
+            if len(r) > 5 and isinstance(r[2], str) and isinstance(r[5], (int, float)):
+                is_prior.setdefault(squash(r[2]), r[5])
+    finally:
+        wb.close()
+    lines = read_aje(aje_path) if aje_path else (read_aje(workpaper) if has_aje else [])
+    if not aje_path and not has_aje:
+        notes.append("수정분개가 없어 시산표 금액 그대로 썼습니다")
+    rows, problems, more = add_new_accounts(tpl, rows, lines)
+    notes += problems
+    net: dict[str, float] = {}
+    for ln in lines:
+        net[ln.account] = net.get(ln.account, 0.0) + ln.debit - ln.credit
+    out = []
+    for x in rows:
+        credit_view = x.side == "liab" or (x.side == "is" and x.key in REVENUE_KEYS)
+        sign = -1 if credit_view else 1
+        adj = sign * net.get(x.label, 0.0)
+        cur = sign * (x.db - x.cb) + adj
+        if x.side == "is":
+            prior = is_prior.get(x.name)
+        else:
+            prior = to_number(bs_prior.get(x.bs_row)) if x.bs_row and bs_prior.get(x.bs_row) is not None else None
+        out.append(Figure(x, cur, prior, adj))
+    ni = sum(f.current * (1 if f.row.key in REVENUE_KEYS else -1) for f in out if f.row.side == "is")
+    return out, ni, notes
 
 
 # ---------------------------------------------------------------- 반영

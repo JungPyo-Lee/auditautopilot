@@ -77,6 +77,8 @@ def test_apply_adds_tabs_and_formulas(filled, tmp_path):
     assert any("대손상각비" in n and "판매관리비" in n for n in res.notes)
     wb = openpyxl.load_workbook(res.output)
     assert wb.sheetnames[-5:] == list(adjust.NEW_TABS)
+    assert wb["AJE"]["E5"].number_format == "#,##0" and wb["AJE"]["E5"].value == 10000   # 새 서식 번호가 맞는지
+    assert wb["AJE"]["A4"].font.b and wb["정산표"]["A1"].font.sz == 13
     ws = wb["정산표"]
     rows = {ws.cell(r, 3).value: r for r in range(5, ws.max_row + 1) if ws.cell(r, 3).value}
     r = rows["대손충당금(외상매출금)"]

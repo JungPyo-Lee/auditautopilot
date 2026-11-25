@@ -234,7 +234,8 @@ class XlsxPackage:
         def append(tag: str, items: list[str]) -> int:
             nonlocal xml
             m = re.search(rf"<{tag}\b([^>]*)>(.*?)</{tag}>", xml, re.S)
-            first = len(re.findall(rf"<{tag[:-1]}\b", m.group(2)))
+            child = {"fonts": "font", "fills": "fill", "cellXfs": "xf"}[tag]
+            first = len(re.findall(rf"<{child}\b", m.group(2)))
             body = m.group(2) + "".join(items)
             head = re.sub(r'\s+count="\d+"', "", m.group(1)) + f' count="{first + len(items)}"'
             xml = xml[:m.start()] + f"<{tag}{head}>{body}</{tag}>" + xml[m.end():]
