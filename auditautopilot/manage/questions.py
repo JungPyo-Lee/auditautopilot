@@ -187,9 +187,44 @@ def xlsx_bytes(engagement: dict, qs: list[dict]) -> bytes:
         row[3].number_format = "#,##0"
         row[4].fill = PatternFill("solid", fgColor="FFF8DC")
     ws.freeze_panes = ws.cell(row=head + 1, column=1)
+    _request_sheet(wb, qs)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+REQUEST_HEADERS = ["번호", "구분", "전표일자", "전표번호", "거래처·적요", "금액", "요청 자료", "제출 여부"]
+
+
+def _request_sheet(wb, qs: list[dict]) -> None:
+    """표본 증빙 요청(source '샘플:매출:2026-03-31:50266')을 따로 모은 '요청자료' 탭."""
+    rows = [q for q in qs if (q.get("source") or "").startswith("샘플:")]
+    if not rows:
+        return
+    ws = wb.create_sheet("요청자료")
+    ws.append(["요청자료 목록 (표본 증빙)"])
+    ws["A1"].font = Font(bold=True, size=13)
+    ws.append(["자료 파일 이름 앞에 번호(예: Q-001)를 붙여 보내 주세요. 답변은 '질문서' 탭의 같은 번호 칸에 적어 주시면 됩니다."])
+    ws.append([])
+    ws.append(REQUEST_HEADERS)
+    head = ws.max_row
+    for c in ws[head]:
+        c.font = Font(bold=True)
+        c.fill = PatternFill("solid", fgColor="DDE6F4")
+    for q in rows:
+        _, kind, day, no = (q["source"].split(":", 3) + ["", "", ""])[:4]
+        head_txt, _, ask = q["question"].rpartition(": ")
+        desc = head_txt.split(f"{day} {no}", 1)[-1]
+        if q["amount"] is not None:
+            desc = desc.replace(f"{q['amount']:,.0f}원", "")
+        desc = re.sub(r"\s+", " ", desc).strip()
+        ws.append([q["code"], f"{kind} 표본", day, no, desc, q["amount"], ask, None])
+    for col, w in zip("ABCDEFGH", (9, 10, 12, 10, 36, 16, 60, 12)):
+        ws.column_dimensions[col].width = w
+    for row in ws.iter_rows(min_row=head + 1):
+        row[5].number_format = "#,##0"
+        row[4].alignment = row[6].alignment = Alignment(wrap_text=True, vertical="top")
+        row[7].fill = PatternFill("solid", fgColor="FFF8DC")
 
 
 def import_answers(store, eid: int, raw: bytes, today: date | None = None) -> tuple[int, list[str]]:
