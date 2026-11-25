@@ -19,6 +19,17 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from .. import confirm
 from . import schedule
 
+# 질문 출처(source) 앞부분 -> 카테고리
+CATEGORIES = (("증감:", "증감과다"), ("대손:", "대손충당금"), ("원가율", "원가율"), ("JE:", "이상전표"),
+              ("샘플:", "표본"), ("채권채무조회:", "채권채무조회"))
+OTHER = "직접 작성"
+
+
+def category(q: dict) -> str:
+    src = q.get("source") or ""
+    return next((name for prefix, name in CATEGORIES if src.startswith(prefix)), OTHER)
+
+
 STATES = ("작성", "승인대기", "승인", "발송", "답변받음", "종결")
 EDITABLE = ("작성", "승인대기")
 # 버튼 → (바꿀 수 있는 이전 상태, 새 상태)

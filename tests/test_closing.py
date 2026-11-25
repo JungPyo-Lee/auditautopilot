@@ -162,3 +162,45 @@ def test_tabs_and_progress(adjusted, server, store):  # noqa: F811
     assert "진행 1/7" in page and "주석 자료를 아직 안 받음" in page
     home = _open(base + "/")[2].decode()
     assert "ministeps" in home and f"/e/{eid}#tab-close" in home
+
+
+def test_step_buttons_list_import_and_question_categories(server, store, tmp_path):  # noqa: F811
+    from auditautopilot.manage import questions
+    from test_manage import _multipart
+    base, _ = server
+    cid = store.add_client("C016", "가나상사", "김담당", "kim@example.com")
+    eid = store.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert page.index("id='tab-pbc'") < page.index("id='tab-mail'")              # 자료요청이 먼저
+    # 완료 처리 → 해제 → 자동
+    st, h, _ = _open(base + f"/e/{eid}/step/lead", {"v": "done"})
+    assert st == 303 and "#tab-lead" in h["Location"]
+    assert "진행 1/7" in _open(base + f"/e/{eid}")[2].decode()
+    _open(base + f"/e/{eid}/step/lead", {"v": "undo"})
+    assert store.get_setting(f"steps:{eid}") == {"lead": False}
+    _open(base + f"/e/{eid}/step/lead", {"v": "auto"})
+    assert store.get_setting(f"steps:{eid}") == {}
+    # 새 요청 리스트: '자료명'·'구분' 표
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["번호", "구분", "자료명"])
+    ws.append([1, "기말감사", "특수관계자 거래 내역"])
+    ws.append([2, "", "보험증권 사본"])
+    ws.append([3, "기말", "특수관계자 거래 내역"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    before = len(store.items(eid))
+    data, hdr = _multipart([("mode", "add"), ("section", "기말감사")], [("list", "새요청.xlsx", buf.getvalue())])
+    st, h, _ = _open(base + f"/e/{eid}/items/import", data, hdr)
+    assert st == 303 and "#tab-pbc" in h["Location"]
+    titles = [i["title"] for i in store.items(eid)]
+    assert len(titles) == before + 2 and "보험증권 사본" in titles
+    data, hdr = _multipart([("mode", "replace"), ("section", "기말감사")], [("list", "새요청.xlsx", buf.getvalue())])
+    _open(base + f"/e/{eid}/items/import", data, hdr)
+    assert sorted(i["title"] for i in store.items(eid)) == ["보험증권 사본", "특수관계자 거래 내역"]
+    # 질문 카테고리
+    questions.add(store, eid, "매출 증가 사유", "매출", 100, source="증감:IS:매출")
+    questions.add(store, eid, "전표 설명", "현금", 5, source="JE:2026-12-31:1")
+    questions.add(store, eid, "직접 쓴 질문")
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "data-cat='증감과다'" in page and "data-cat='이상전표'" in page and "직접 작성 1</button>" in page

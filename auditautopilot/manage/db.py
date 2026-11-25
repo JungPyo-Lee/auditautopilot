@@ -274,6 +274,13 @@ class Store:
                             "VALUES(?, ?, ?, ?, ?)", (engagement_id, code, section, title.strip(), sort))
         return cur.lastrowid
 
+    def remove_unrequested_items(self, engagement_id: int) -> int:
+        """아직 요청하지 않았고(미요청) 받은 파일도 없는 항목을 지운다. 반환: 지운 수"""
+        with self.tx() as c:
+            cur = c.execute("DELETE FROM pbc_items WHERE engagement_id = ? AND status = '미요청' "
+                            "AND id NOT IN (SELECT item_id FROM received_files WHERE item_id IS NOT NULL)", (engagement_id,))
+        return cur.rowcount
+
     def update_item(self, item_id: int, status: str | None = None, note: str | None = None,
                     on: date | None = None) -> None:
         item = self._one("SELECT * FROM pbc_items WHERE id = ?", item_id)
