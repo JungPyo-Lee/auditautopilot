@@ -24,45 +24,118 @@ from . import auto_questions, config, confirmations, filing, mailbox, mailer, ni
 from .db import KINDS, STATUSES, Store
 
 MAX_UPLOAD = 300 * 1024 * 1024
-STATUS_COLOR = {"미요청": "#8a8f98", "요청": "#2f6fdf", "일부수령": "#c07a00", "수령": "#1d8a4e",
-                "검토완료": "#11613a", "보완요청": "#c2362b", "해당없음": "#b5b9c0",
-                # 질문서
-                "작성": "#8a8f98", "승인대기": "#c07a00", "승인": "#2f6fdf", "발송": "#6a4fc7",
-                "답변받음": "#1d8a4e", "종결": "#11613a"}
+# 상태 → 색 톤. 실제 색은 CSS 토큰(--ok, --ok-bg 등)에서 정한다.
+STATUS_TONE = {"미요청": "neutral", "요청": "info", "일부수령": "caution", "수령": "ok",
+               "검토완료": "done", "보완요청": "danger", "해당없음": "muted",
+               # 질문서
+               "작성": "neutral", "승인대기": "caution", "승인": "info", "발송": "violet",
+               "답변받음": "ok", "종결": "done"}
 
+# 디자인 토큰: 색·간격·글자·모서리를 여기서만 정한다. 화면 코드에는 색을 직접 쓰지 않는다.
 CSS = """
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1d2330;--mute:#677083;--line:#e2e5ea;--accent:#2f6fdf;--warn:#c2362b}
-*{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,"Malgun Gothic","맑은 고딕",sans-serif;
-background:var(--bg);color:var(--ink)}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-header{background:#1d2330;color:#fff;padding:10px 20px;display:flex;gap:20px;align-items:center}
-header a{color:#cfd6e4}header b{color:#fff;margin-right:12px}main{max-width:1200px;margin:0 auto;padding:20px}
-h1{font-size:20px;margin:4px 0 16px}h2{font-size:16px;margin:24px 0 8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
-.card.alert{border:2px solid var(--warn);box-shadow:0 0 0 3px rgba(194,54,43,.12)}.badge-bad{display:inline-block;border:2px solid var(--warn);color:var(--warn);border-radius:6px;padding:0 6px;font-weight:600}
-.badge-ok{color:#1d7a3a}
-table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);
-vertical-align:top}th{font-weight:600;color:var(--mute);font-size:12px;background:#fafbfc}
-input,select,textarea{font:inherit;padding:5px 7px;border:1px solid #c9ced6;border-radius:5px;background:#fff}
-textarea{width:100%}button,.btn{font:inherit;padding:6px 12px;border:1px solid var(--accent);background:var(--accent);
-color:#fff;border-radius:5px;cursor:pointer;display:inline-block}button.ghost,.btn.ghost{background:#fff;color:var(--accent)}
-.pill{display:inline-block;padding:1px 8px;border-radius:10px;color:#fff;font-size:12px;white-space:nowrap}
-.mute{color:var(--mute)}.warn{color:var(--warn)}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
-.row label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mute)}
-.msg{padding:10px 14px;border-radius:6px;background:#e8f1ff;margin-bottom:16px;position:sticky;top:0;z-index:5;box-shadow:0 2px 6px rgba(0,0,0,.12)}.msg.err{background:#fdecea}
-pre{white-space:pre-wrap;font-family:inherit;background:#fafbfc;border:1px solid var(--line);padding:10px;border-radius:6px;margin:6px 0}
-.bar{height:8px;background:#e9ecf1;border-radius:4px;overflow:hidden;min-width:120px}
-.bar i{display:block;height:100%;background:#1d8a4e}
-button,.btn{white-space:nowrap}.card{overflow-x:auto}
-.co{font-size:22px;margin:4px 0 2px}.steps{display:flex;gap:3px;margin:12px 0 4px}
-.steps a{flex:1;color:#fff;font-size:12px;text-align:center;padding:6px 4px;border-radius:4px;text-decoration:none;
-white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.steps a.ok{background:#1d8a4e}.steps a.no{background:#c2362b}
-.ministeps{display:flex;gap:2px}.ministeps span{width:18px;height:12px;border-radius:2px;display:inline-block}
-.ministeps .ok{background:#1d8a4e}.ministeps .no{background:#c2362b}
-.tabs{display:flex;gap:2px;border-bottom:2px solid #9aa3b2;margin-top:14px;flex-wrap:wrap}
-.tabs a{padding:7px 14px;background:#e4e7ec;border:1px solid #c9ced6;border-bottom:none;border-radius:6px 6px 0 0;
-color:var(--ink);font-size:13px;text-decoration:none}.tabs a.on{background:#fff;font-weight:600;border-color:#9aa3b2;
-position:relative;top:2px;border-bottom:2px solid #fff}.tabs a i{font-style:normal;margin-right:4px}
-.stepctl{margin-bottom:10px;align-items:center}.js .tab{display:none}.js .tab.on{display:block}.tab{padding-top:14px}td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
+:root{
+--font:"Geist","Pretendard","Pretendard Variable",-apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic","맑은 고딕",sans-serif;
+--fs-xs:11.5px;--fs-sm:12.5px;--fs-md:14px;--fs-lg:16px;--fs-xl:21px;
+--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--sp-6:32px;
+--r-sm:6px;--r-md:8px;--r-lg:12px;--r-pill:999px;
+--bg:#f7f4eb;--surface:#fff;--surface-2:#fbf9f3;--surface-3:#efebdf;
+--ink:#14170f;--ink-2:#3b3f33;--mute:#6f6b5e;--line:#e8e2d2;--line-2:#d5cdb9;--hover:#fcfaf4;--line-hover:#b9b09a;
+--nav:#0d1f08;--nav-ink:rgba(247,244,235,.72);--nav-on:#f7f4eb;
+--accent:#31110f;--accent-hover:#4a1c18;--accent-bg:#f4ece8;--link:#7a2a20;--focus:rgba(49,17,15,.22);
+--ok:#2c6a22;--ok-bg:#e8f1e1;--done:#0d1f08;--done-bg:#dde8d4;
+--caution:#9a5a00;--caution-bg:#faefd9;--danger:#b3261e;--danger-bg:#fbeae6;--danger-soft:#ecc2bb;
+--info:#2d5a8c;--info-bg:#e7eef6;--violet:#6447c0;--violet-bg:#efebfb;
+--neutral:#5c5a4f;--neutral-bg:#efebdf;--muted:#8e8a7c;--muted-bg:#f4f1e8;
+--warn:var(--danger);
+--shadow-1:0 1px 2px rgba(20,23,15,.04);--shadow-2:0 4px 14px rgba(20,23,15,.10);
+}
+*{box-sizing:border-box}
+body{margin:0;font:var(--fs-md)/1.5 var(--font);background:var(--bg);color:var(--ink);
+-webkit-font-smoothing:antialiased}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+header{background:var(--nav);color:var(--nav-on);padding:0 var(--sp-5);height:48px;display:flex;gap:var(--sp-1);
+align-items:center;position:sticky;top:0;z-index:10;box-shadow:0 1px 0 rgba(255,255,255,.06)}
+header b{color:var(--nav-on);margin-right:var(--sp-5);font-size:15px;letter-spacing:-.01em;display:flex;align-items:center;gap:var(--sp-2)}
+header b:before{content:"";width:18px;height:18px;border-radius:5px;background:var(--nav-on);
+box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+header a{color:var(--nav-ink);padding:6px 12px;border-radius:var(--r-sm);font-size:13.5px}
+header a:hover{color:var(--nav-on);background:rgba(255,255,255,.08);text-decoration:none}
+main{max-width:1280px;margin:0 auto;padding:var(--sp-5) var(--sp-5) var(--sp-6)}
+h1{font-size:var(--fs-xl);font-weight:600;letter-spacing:-.03em;margin:var(--sp-1) 0 var(--sp-4)}
+h2{font-size:var(--fs-lg);font-weight:650;letter-spacing:-.01em;margin:var(--sp-5) 0 var(--sp-2)}
+.card>h2:first-child{margin-top:0}
+p{margin:var(--sp-2) 0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp-4) 20px;
+margin-bottom:var(--sp-4);box-shadow:var(--shadow-1);overflow-x:auto}
+.card.alert{border-color:var(--danger);box-shadow:0 0 0 3px var(--danger-bg)}
+.badge-bad{display:inline-block;background:var(--danger-bg);color:var(--danger);border:1px solid currentColor;
+border-radius:var(--r-sm);padding:0 6px;font-weight:600}
+.badge-ok{color:var(--ok)}
+table{border-collapse:separate;border-spacing:0;width:100%;font-size:13.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mute);font-size:var(--fs-xs);letter-spacing:.02em;background:var(--surface-2);
+border-bottom-color:var(--line-2);white-space:nowrap}
+tr:first-child th:first-child{border-top-left-radius:var(--r-sm)}tr:first-child th:last-child{border-top-right-radius:var(--r-sm)}
+tbody tr:hover td,table tr:hover td{background:var(--hover)}
+td.num,th.num{text-align:right}
+input,select,textarea{font:inherit;font-size:13.5px;padding:5px 8px;border:1px solid var(--line-2);border-radius:var(--r-sm);
+background:var(--surface);color:var(--ink);transition:border-color .12s,box-shadow .12s}
+input:hover,select:hover,textarea:hover{border-color:var(--line-hover)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+textarea{width:100%}
+button,.btn{font:inherit;font-size:13.5px;font-weight:550;padding:6px 14px;border:1px solid var(--accent);background:var(--accent);
+color:#fff;border-radius:var(--r-pill);cursor:pointer;display:inline-block;white-space:nowrap;line-height:1.45;
+transition:background .12s,border-color .12s,box-shadow .12s}
+button:hover,.btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);text-decoration:none}
+button:focus-visible,.btn:focus-visible,a:focus-visible{outline:none;box-shadow:0 0 0 3px var(--focus)}
+button.ghost,.btn.ghost{background:var(--surface);color:var(--ink-2);border-color:var(--line-2)}
+button.ghost:hover,.btn.ghost:hover{background:var(--surface-2);color:var(--accent);border-color:var(--accent)}
+button.danger,.btn.danger{color:var(--danger);border-color:var(--danger);background:var(--surface)}
+button.danger:hover,.btn.danger:hover{background:var(--danger-bg)}
+.pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap;
+line-height:1.6;background:var(--neutral-bg);color:var(--neutral)}
+.pill:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;
+margin-right:5px;vertical-align:1px}
+.pill.plain:before{display:none}
+.t-neutral{background:var(--neutral-bg);color:var(--neutral)}.t-info{background:var(--info-bg);color:var(--info)}
+.t-caution{background:var(--caution-bg);color:var(--caution)}.t-ok{background:var(--ok-bg);color:var(--ok)}
+.t-done{background:var(--done-bg);color:var(--done)}.t-danger{background:var(--danger-bg);color:var(--danger)}
+.t-violet{background:var(--violet-bg);color:var(--violet)}.t-muted{background:var(--muted-bg);color:var(--muted)}
+.mute{color:var(--mute)}.warn{color:var(--danger)}
+.row{display:flex;gap:var(--sp-3);flex-wrap:wrap;align-items:end}
+.row label{display:flex;flex-direction:column;gap:3px;font-size:var(--fs-sm);color:var(--mute);font-weight:500}
+.msg{padding:10px 14px;border-radius:var(--r-md);background:var(--info-bg);color:var(--ink);border-left:4px solid var(--info);
+margin-bottom:var(--sp-4);position:sticky;top:56px;z-index:5;box-shadow:var(--shadow-2)}
+.msg.err{background:var(--danger-bg);border-left-color:var(--danger)}
+pre{white-space:pre-wrap;font-family:inherit;background:var(--surface-2);border:1px solid var(--line);padding:var(--sp-3);
+border-radius:var(--r-md);margin:6px 0}
+details>summary{cursor:pointer;color:var(--ink-2);font-weight:550}
+.bar{height:8px;background:var(--surface-3);border-radius:999px;overflow:hidden;min-width:120px}
+.bar i{display:block;height:100%;background:var(--ok);border-radius:999px}
+.co{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:var(--sp-1) 0 2px}
+.steps{display:flex;gap:4px;margin:var(--sp-3) 0 var(--sp-1)}
+.steps a{flex:1;font-size:12.5px;font-weight:600;text-align:center;padding:7px 6px;border-radius:var(--r-sm);text-decoration:none;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent}
+.steps a.ok{background:var(--ok);color:#fff}
+.steps a.no{background:var(--surface);color:var(--danger);border-color:var(--danger-soft)}
+.steps a:hover{filter:brightness(.96);text-decoration:none}
+.ministeps{display:flex;gap:3px}.ministeps span{width:16px;height:10px;border-radius:3px;display:inline-block}
+.ministeps .ok{background:var(--ok)}.ministeps .no{background:var(--danger-soft)}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line-2);margin-top:var(--sp-4);flex-wrap:wrap}
+.tabs a{padding:9px 14px;color:var(--ink-2);font-size:13.5px;font-weight:550;text-decoration:none;
+border-bottom:2px solid transparent;margin-bottom:-1px;border-radius:var(--r-sm) var(--r-sm) 0 0}
+.tabs a:hover{color:var(--ink);background:var(--surface-3)}
+.tabs a.on{color:var(--accent);border-bottom-color:var(--accent);background:var(--surface)}
+.tabs a i{font-style:normal;margin-right:6px;display:inline-block;width:7px;height:7px;border-radius:50%;vertical-align:1px;
+background:var(--danger-soft)}
+.tabs a i.done{background:var(--ok)}
+.stepctl{margin-bottom:var(--sp-3);align-items:center;background:var(--surface);border:1px solid var(--line);
+border-radius:var(--r-md);padding:var(--sp-2) var(--sp-3)}
+.js .tab{display:none}.js .tab.on{display:block}.tab{padding-top:var(--sp-4)}
+td input:not([type=checkbox]):not([type=hidden]){width:100%;min-width:56px}
+@media (max-width:720px){main{padding:var(--sp-4)}header{padding:0 var(--sp-4);overflow-x:auto}.steps{flex-wrap:wrap}
+.steps a{flex:1 1 30%}}
 """
 
 
@@ -71,7 +144,7 @@ def esc(v) -> str:
 
 
 def pill(status: str) -> str:
-    return f'<span class="pill" style="background:{STATUS_COLOR.get(status, "#888")}">{esc(status)}</span>'
+    return f'<span class="pill t-{STATUS_TONE.get(status, "neutral")}">{esc(status)}</span>'
 
 
 def page(title: str, body: str, flash: str = "", error: bool = False) -> bytes:
@@ -382,7 +455,7 @@ class Handler(BaseHTTPRequestHandler):
         done = sum(1 for p in prog if p[2])
         bar = "".join(f"<a href='#tab-{k}' class='{'ok' if ok else 'no'}' title='{esc(lbl)}: {esc(hint)}'>"
                       f"{'✓' if ok else '✗'} {esc(lbl)}</a>" for k, lbl, ok, hint in prog)
-        tabs = "".join(f"<a href='#tab-{k}' data-tab='{k}'><i style='color:{'#1d8a4e' if ok else '#c2362b'}'>●</i>"
+        tabs = "".join(f"<a href='#tab-{k}' data-tab='{k}'><i class='{'done' if ok else 'todo'}'></i>"
                        f"{esc(lbl)}</a>" for k, lbl, ok, _ in prog)
         manual = self.store.get_setting(f"steps:{e['id']}") or {}
 
@@ -483,7 +556,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
                 f"<td><input form='{fid}' name='cc' value='{esc(c['cc'])}' placeholder='쉼표로 구분'></td>"
                 f"<td><select form='{fid}' name='send_from'>{options(senders, c['send_from'])}</select></td>"
                 f"<td><button form='{fid}' class='ghost'>저장</button></td></tr>")
-        body = f"""<div class="card"><h2 style="margin-top:0">새 회사</h2>
+        body = f"""<div class="card"><h2>새 회사</h2>
 <form method="post" action="/clients" class="row">
 <label>회사코드<input name="code" required placeholder="C001" size="6"></label>
 <label>회사명<input name="name" required></label>
@@ -597,13 +670,13 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
                       f"{lrows}</table>") if lrows else ""
         lead_rec = self.store.get_setting(f"leadsheet:{e['id']}")
         panels = {
-            "mail": f"""<div class="card"><h2 style="margin-top:0">메일 일정</h2>
+            "mail": f"""<div class="card"><h2>메일 일정</h2>
 <table><tr><th>날짜</th><th>메일</th><th>상태</th><th></th></tr>{''.join(steps)}</table>
 <form method="post" action="/e/{e['id']}/dates" class="row" style="margin-top:10px">
 <label>현장감사 시작일<input type="date" name="fieldwork_start" value="{esc(e['fieldwork_start'])}"></label>
 <label>종료일<input type="date" name="fieldwork_end" value="{esc(e['fieldwork_end'])}"></label>
 <button class="ghost">일정 바꾸기</button></form></div>""",
-            "pbc": f"""<div class="card"><h2 style="margin-top:0">자료요청 목록</h2><p>{summary}
+            "pbc": f"""<div class="card"><h2>자료요청 목록</h2><p>{summary}
 <a class="btn ghost" href="/e/{e['id']}/pbc.xlsx">엑셀로 받기</a></p>
 <form method="post" action="/e/{e['id']}/items"><table>
 <tr><th>요청번호</th><th>구분</th><th>자료명</th><th>상태</th><th>요청일</th><th>수령일</th><th>비고(메일에 함께 나감)</th></tr>
@@ -620,7 +693,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
 <button class="ghost">리스트 반영</button></form>
 <p class="mute">감사준비자료 4열 양식(기본자료 | 중간감사 | 기말감사 | 실사), '자료명'(+'구분') 열이 있는 표, 또는 첫 열에 자료명만 적은 목록을 받습니다.
 기본 양식(업종 템플릿)은 그대로 두고 이 감사 건에만 반영합니다. '바꾸기'는 미요청 상태이고 받은 파일이 없는 항목만 지웁니다.</p></div>""",
-            "files": f"""<div class="card"><h2 style="margin-top:0">받은 자료</h2>
+            "files": f"""<div class="card"><h2>받은 자료</h2>
 <p>회사가 메일로 보낸 첨부는 프로그램이 켜져 있는 동안 {cfg['check_minutes']}분마다 메일함을 읽어 <b>저절로 저장</b>합니다
 (폴더 규칙대로 저장하고, 파일 이름에 요청번호나 자료명이 있으면 그 항목을 '수령'으로 바꿈). 따로 올릴 필요가 없습니다.</p>
 <form method="post" action="/mail/fetch" class="row"><input type="hidden" name="back" value="/e/{e['id']}#tab-files">
@@ -644,7 +717,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
 · 담당자 {esc(e['contact_name'] or '-')} &lt;{esc(e['contact_email'] or '이메일 없음')}&gt;</p>
 {self._tabs(e, cfg, panels)}
 <form method="post" action="/e/{e['id']}/delete" onsubmit="return confirm('이 감사 건과 요청 목록을 지웁니다. 저장된 파일은 지우지 않습니다.')">
-<button class="ghost" style="color:var(--warn);border-color:var(--warn)">감사 건 삭제</button></form>"""
+<button class="danger">감사 건 삭제</button></form>"""
         self._send(page(f"{e['client_name']} {e['fiscal_year']} {e['kind']}", body, *self._flash()))
 
     def engagement_dates(self, eid):
@@ -773,7 +846,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
                       f"<table><tr><th>계정</th><th>건수</th><th>일치</th><th>불일치</th><th>미회신</th><th>발송금액(원화)</th></tr>"
                       f"{rows}</table>")
         alert = " alert" if a and not a["ok"] else ""
-        return f"""<div class="card{alert}" id="confirm"><h2 style="margin-top:0">채권채무 조회 (전자조회)</h2>
+        return f"""<div class="card{alert}" id="confirm"><h2>채권채무 조회 (전자조회)</h2>
 {top}{mat_form}
 <div style="margin-top:10px">{verdict}{result}</div>
 <form method="post" action="/e/{eid}/confirm" enctype="multipart/form-data" class="row" style="margin-top:10px">
@@ -790,7 +863,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
             lines = "".join(f"<li>{esc(x)}</li>" for x in rec.get("lines", []))
             last = (f"<p>{esc(rec.get('made_at', ''))} 만든 조서: <a class='btn ghost' href='/e/{eid}/leadsheet.xlsx'>"
                     f"{esc(Path(rec.get('path', '')).name)} 내려받기</a></p><ul class='mute'>{lines}</ul>")
-        return f"""<div class="card" id="leadsheet"><h2 style="margin-top:0">리드시트·거래처 명세 (조서 채우기)</h2>
+        return f"""<div class="card" id="leadsheet"><h2>리드시트·거래처 명세 (조서 채우기)</h2>
 <form method="post" action="/e/{eid}/leadsheet" enctype="multipart/form-data">
 <div class="row"><label>조서 양식<input type="file" name="workpaper" accept=".xlsx" required></label>
 <label>회사 자료 (여러 개)<input type="file" name="files" multiple accept=".xlsx"></label>
@@ -825,7 +898,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 
         eid = e["id"]
         wp = self._working_workpaper(e)
-        head = '<div class="card" id="assign"><h2 style="margin-top:0">담당자별 조서 (맡은 탭만 보이기)</h2>'
+        head = '<div class="card" id="assign"><h2>담당자별 조서 (맡은 탭만 보이기)</h2>'
         if wp is None:
             return head + "<p class='mute'>위에서 [조서 채우기]를 하면 여기서 인덱스마다 담당자를 정하고 담당자별 조서를 받을 수 있습니다.</p></div>"
         try:
@@ -1130,7 +1203,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             ans = esc(q["answer"]) if q["answer"] else "<span class='mute'>-</span>"
             cat = questions.category(q)
             rows.append(f"<tr><td><input type='checkbox' name='ids' value='{q['id']}' form='qact' data-cat='{esc(cat)}'></td>"
-                        f"<td>{esc(q['code'])}</td><td><span class='pill' style='background:#6b7a90'>{esc(cat)}</span></td>"
+                        f"<td>{esc(q['code'])}</td><td><span class='pill plain t-neutral'>{esc(cat)}</span></td>"
                         f"<td>{acc}</td><td>{qcell}</td><td style='text-align:right'>{amt}</td>"
                         f"<td>{pill(q['status'])}{who}</td><td>{ans}</td></tr>")
         table = ("<table><tr><th></th><th>번호</th><th>구분</th><th>계정</th><th>질문</th><th>금액</th><th>상태</th><th>답변</th></tr>"
@@ -1149,7 +1222,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         n_ok = counts["승인"]
         mail_btn = (f"<a class='btn' href='/e/{eid}/questions/mail'>승인한 질문 {n_ok}건 메일 미리보기</a>" if n_ok
                     else "<span class='mute'>승인한 질문이 있으면 메일로 보낼 수 있습니다.</span>")
-        return f"""<div class="card" id="questions"><h2 style="margin-top:0">질문서</h2>
+        return f"""<div class="card" id="questions"><h2>질문서</h2>
 <p>{summary or ''}</p>
 <form id="qact" method="post" action="/e/{eid}/questions/act" class="row">
 <button type="button" class="ghost" onclick="document.querySelectorAll('input[name=ids][form=qact]').forEach(c=>c.checked=true)">모두 선택</button>
@@ -1626,16 +1699,16 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             return f'<label style="display:block;margin:8px 0">{label}<textarea name="{key}" rows="{rows}">{esc(cfg[key])}</textarea></label>'
 
         body = f"""<form method="post" action="/settings">
-<div class="card"><h2 style="margin-top:0">보내는 사람</h2><div class="row">
+<div class="card"><h2>보내는 사람</h2><div class="row">
 {inp('firm_name', '회계법인')}{inp('author', '작성자')}{inp('contact', '연락처(전화·메일)')}{inp('sender_email', '보내는 메일 주소')}</div></div>
-<div class="card"><h2 style="margin-top:0">일정</h2><div class="row">
+<div class="card"><h2>일정</h2><div class="row">
 {inp('request_offset', '최초 요청 (현장감사 D-n)', type='number', style='width:80px')}
 {inp('reminder_from', '독촉 시작 (D-n부터 매일)', type='number', style='width:80px')}
 {inp('due_offset', '제출기한 (D-n)', type='number', style='width:80px')}
 <label style="flex-direction:row;gap:4px"><input type="checkbox" name="skip_weekends" value="1" {'checked' if cfg['skip_weekends'] else ''}>주말에는 보내지 않음</label></div>
 <label style="display:block;margin-top:8px">공휴일 (YYYY-MM-DD, 줄마다 하나. 이날은 보내지 않음)
 <textarea name="holidays" rows="3">{esc(chr(10).join(cfg['holidays']))}</textarea></label></div>
-<div class="card"><h2 style="margin-top:0">저장 폴더 규칙</h2>
+<div class="card"><h2>저장 폴더 규칙</h2>
 <div class="row">{inp('root', '루트 폴더', size=40)}
 <label>미리 만든 규칙<select onchange="if(this.value)document.getElementById('rule').value=this.value">
 <option value="">고르기…</option>{presets}</select></label></div>
@@ -1644,7 +1717,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 <p>예시: <code>{esc(pv)}</code></p>
 <label style="display:block">분류 폴더 (쉼표로 구분, 순서가 {{분류번호}})<input name="categories" value="{esc(', '.join(cfg['categories']))}" style="width:100%"></label>
 <p class="mute">규칙을 바꾸면 이후 받는 파일부터 적용됩니다.</p></div>
-<div class="card"><h2 style="margin-top:0">메일 문구</h2>
+<div class="card"><h2>메일 문구</h2>
 <p class="mute">중괄호 칸은 자동으로 채워집니다: {{회계법인}} {{작성자}} {{연락처}} {{담당자}} {{회사명}} {{사업연도}} {{감사구분}}
 {{현장감사 시작일}} {{현장감사 종료일}} {{제출기한}} {{미제출 건수}} {{D-n}} {{감사코드}} {{요청 자료 표}} {{미제출 자료 표}}</p>
 {inp('request_subject', '최초 요청 제목', style='width:100%')}{area('request_body', '최초 요청 본문', 12)}
@@ -1660,7 +1733,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         n = len(confirmations.cached_projects(self.store))
         test = (f"<form method='post' action='/settings/nice-test' style='margin-top:8px'><button class='ghost'>로그인 시험 (프로젝트 목록 불러오기)</button>"
                 f"{f' <span class=mute>불러온 프로젝트 {n}개</span>' if n else ''}</form>") if u else ""
-        return f"""<div class="card" id="nice"><h2 style="margin-top:0">전자조회 계정 (한공회 채권채무 전자조회)</h2>
+        return f"""<div class="card" id="nice"><h2>전자조회 계정 (한공회 채권채무 전자조회)</h2>
 <form method="post" action="/settings/nice" class="row">
 <label>아이디<input name="nice_user" value="{esc(u)}" autocomplete="username"></label>
 <label>비밀번호 {pw}<input name="password" type="password" autocomplete="current-password" placeholder="바꿀 때만 입력"></label>
@@ -1691,7 +1764,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         table = ("<table><tr><th>계정</th><th>메일</th><th>서버 (받기 / 보내기)</th><th>비밀번호</th><th></th></tr>"
                  + "".join(rows) + "</table>") if rows else "<p class='mute'>아직 연결한 계정이 없습니다.</p>"
         senders = [(a["user"], a["user"]) for a in cfg["mail_accounts"]]
-        return f"""<div class="card" id="mail"><h2 style="margin-top:0">메일 계정</h2>
+        return f"""<div class="card" id="mail"><h2>메일 계정</h2>
 <p class="mute">계정을 여러 개 넣을 수 있습니다. 받은 메일은 모든 계정에서 확인하고, 보낼 때는 기본 계정(또는 회사 화면에서
 회사마다 정한 계정)을 씁니다. 대부분 일반 비밀번호 대신 메일 설정에서 만든 '앱 비밀번호'를 넣어야 하며,
 비밀번호는 데이터베이스에 저장하지 않습니다.</p>{table}
