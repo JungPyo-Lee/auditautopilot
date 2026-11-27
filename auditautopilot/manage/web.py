@@ -2018,7 +2018,7 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8765, open_browser:
     srv = make_server(store, host, port)
     url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
     print(f"관리 화면: {url}  (끝내려면 Ctrl+C)")
-    print(f"데이터베이스: {Path(db_path).resolve()}")
+    print(f"데이터 폴더: {Path(db_path).resolve().parent}  (프로그램을 업데이트해도 여기 데이터는 지워지지 않습니다)")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     start_background(srv)

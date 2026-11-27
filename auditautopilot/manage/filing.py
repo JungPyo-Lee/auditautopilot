@@ -46,7 +46,7 @@ def context(engagement: dict, category: str, cfg: dict, original_name: str, item
     if category == unmatched:
         cat_no = 99
     return {
-        "루트": cfg.get("root", "data/감사"),
+        "루트": cfg.get("root") or _default_root(),
         "회사코드": engagement["client_code"],
         "회사명": engagement["client_name"],
         "회사순번": int(engagement.get("client_seq") or 1),
@@ -173,9 +173,14 @@ def save_file(store, engagement: dict, cfg: dict, original_name: str, *, data: b
     return {"path": dest, "item": item, "matched": item is not None}
 
 
+def _default_root() -> str:
+    from .storage import default_root
+    return str(default_root())
+
+
 def inbox_dir(engagement: dict, cfg: dict) -> Path:
     """수동으로 받은 파일(대용량 링크 등)을 넣어 두는 폴더."""
-    return Path(cfg.get("root", "data/감사")) / "_수신함" / clean(f"{engagement['client_code']}_{engagement['client_name']}"
+    return Path(cfg.get("root") or _default_root()) / "_수신함" / clean(f"{engagement['client_code']}_{engagement['client_name']}"
                                                                  f"_{engagement['fiscal_year']}_{engagement['kind']}")
 
 

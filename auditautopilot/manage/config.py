@@ -89,7 +89,13 @@ DEFAULTS = {
 
 
 def load(store) -> dict:
+    from . import storage
     cfg = {k: store.get_setting(k, v) for k, v in DEFAULTS.items()}
+    # 저장 폴더: 예전 상대 경로('data/감사')나 빈 값이면 프로그램 바깥 고정 폴더로 바꾼다 (업데이트해도 안 지워지게)
+    if not cfg["root"] or cfg["root"] == storage.LEGACY_ROOT:
+        cfg["root"] = str(storage.default_root())
+        if store.get_setting("root") != cfg["root"]:
+            store.set_setting("root", cfg["root"])
     if not cfg["mail_accounts"] and store.get_setting("mail_user"):
         # 계정 하나만 있던 이전 설정을 옮긴다
         old = {k: store.get_setting(k) for k in ("mail_user", "mail_provider", "imap_host", "imap_port",

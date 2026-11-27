@@ -275,9 +275,19 @@ def cmd_fs(args) -> int:
 
 
 def cmd_serve(args) -> int:
+    from pathlib import Path
+
+    from .manage import storage
     from .manage.web import serve
 
-    serve(args.db, host=args.host, port=args.port, open_browser=not args.no_browser)
+    db = args.db
+    if db is None:                     # 기본: 프로그램 바깥 고정 폴더 (업데이트해도 데이터가 남는다)
+        moved = storage.migrate_old_install(Path("data"))
+        if moved:
+            print(f"예전 data 폴더를 {moved} 로 옮겼습니다.")
+        db = str(storage.default_db())
+    Path(db).resolve().parent.mkdir(parents=True, exist_ok=True)
+    serve(db, host=args.host, port=args.port, open_browser=not args.no_browser)
     return 0
 
 
@@ -375,7 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
     fp.set_defaults(func=cmd_fs)
 
     sv = sub.add_parser("serve", help="관리 화면(브라우저) 열기")
-    sv.add_argument("--db", default="data/audit.db", help="데이터베이스 파일 (기본 data/audit.db)")
+    sv.add_argument("--db", default=None,
+                    help="데이터베이스 파일 (기본: 프로그램 바깥 사용자 폴더의 audit.db)")
     sv.add_argument("--host", default="127.0.0.1",
                     help="기본은 이 PC에서만 접속. 팀 공유는 0.0.0.0 (로그인 기능 전이므로 사무실 내부망에서만)")
     sv.add_argument("--port", type=int, default=8765)
