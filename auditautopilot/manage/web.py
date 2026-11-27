@@ -338,6 +338,7 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)\.eml", "mail_eml"),
         ("POST", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)/sent", "mail_sent"),
         ("POST", r"/e/(\d+)/mail/(request|reminder|dday)/(\d{4}-\d\d-\d\d)/send", "mail_send"),
+        ("POST", r"/e/(\d+)/mail/resend", "mail_resend"),
         ("POST", r"/e/(\d+)/links/(\d+)/done", "link_done"),
         ("POST", r"/mail/fetch", "mail_fetch"),
         ("GET", r"/settings", "settings"),
@@ -634,12 +635,17 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
         e, cfg, today = self._eng(eid), self.app.cfg(), self.app.today()
         items = self.store.items(e["id"])
         steps = []
+        can_send = bool(cfg["mail_accounts"] and e.get("contact_email"))
+        n_out = len(self.store.outstanding(e["id"]))
         for p in schedule.plan(e, cfg):
             sent = self.store.mail_sent(e["id"], p.kind, p.on) or (p.kind == "request" and self.store.request_sent(e["id"]))
             state = "보냄" if sent else ("오늘" if p.on == today else ("지남" if p.on < today else "예정"))
             link = f"/e/{e['id']}/mail/{p.kind}/{p.on.isoformat()}"
+            btn = ""
+            if can_send and (not sent or n_out):
+                btn = self._send_form(f"{link}/send", e["contact_email"], n_out, again=bool(sent), small=True)
             steps.append(f"<tr><td>{p.on.isoformat()}</td><td>{esc(p.label)}</td><td>{state}</td>"
-                         f"<td><a href='{link}'>문구 보기</a></td></tr>")
+                         f"<td><a href='{link}'>문구 보기</a> {btn}</td></tr>")
         counts = {s: sum(1 for i in items if i["status"] == s) for s in STATUSES}
         summary = " ".join(f"{pill(s)} {n}" for s, n in counts.items() if n)
         status_opts = [(s, s) for s in STATUSES]
@@ -678,7 +684,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
 <label>종료일<input type="date" name="fieldwork_end" value="{esc(e['fieldwork_end'])}"></label>
 <button class="ghost">일정 바꾸기</button></form></div>""",
             "pbc": f"""<div class="card"><h2>자료요청 목록</h2><p>{summary}
-<a class="btn ghost" href="/e/{e['id']}/pbc.xlsx">엑셀로 받기</a></p>
+<a class="btn ghost" href="/e/{e['id']}/pbc.xlsx">엑셀로 받기</a> {self._resend_button(e, cfg)}</p>
 <form method="post" action="/e/{e['id']}/items"><table>
 <tr><th>요청번호</th><th>구분</th><th>자료명</th><th>상태</th><th>요청일</th><th>수령일</th><th>비고(메일에 함께 나감)</th></tr>
 {''.join(irows)}</table><p><button>상태 저장</button></p></form>
@@ -863,7 +869,11 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
         if rec:
             lines = "".join(f"<li>{esc(x)}</li>" for x in rec.get("lines", []))
             last = (f"<p>{esc(rec.get('made_at', ''))} 만든 조서: <a class='btn ghost' href='/e/{eid}/leadsheet.xlsx'>"
-                    f"{esc(Path(rec.get('path', '')).name)} 내려받기</a></p><ul class='mute'>{lines}</ul>")
+                    f"{esc(Path(rec.get('path', '')).name)} 내려받기</a> "
+                    f"<a class='btn' href='/e/{eid}/mine.xlsx'>전체계정 조서 내려받기</a></p>"
+                    f"<p class='mute'>전체계정 조서는 담당자 배정과 관계없이 모든 계정 탭이 보이고(절차서 탭만 숨김) 맨 앞에 목차가 붙습니다. "
+                    f"수정분개를 반영했으면 반영한 조서로 받습니다. 수정분개 반영·재무제표 초안은 늘 이 전체계정 조서로 만듭니다.</p>"
+                    f"<ul class='mute'>{lines}</ul>")
         return f"""<div class="card" id="leadsheet"><h2>리드시트·거래처 명세 (조서 채우기)</h2>
 <form method="post" action="/e/{eid}/leadsheet" enctype="multipart/form-data">
 <div class="row"><label>조서 양식<input type="file" name="workpaper" accept=".xlsx" required></label>
@@ -973,7 +983,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
                          f"<td><select name='cat_{esc(a.index)}'>{options([(x, x) for x in CATEGORIES], c)}</select></td>"
                          f"{checks}</tr>")
         note = "<p class='mute'>* 표시는 참여자 명단에 없지만 조서에 담당자로 적혀 있는 사람입니다.</p>" if extra else ""
-        return head + f"""<p class="row">{btns}<a class="btn ghost" href="/e/{eid}/mine.xlsx">전체 조서 (절차서 탭만 숨김)</a></p>
+        return head + f"""<p class="row">{btns}<a class="btn ghost" href="/e/{eid}/mine.xlsx">전체계정 조서 (절차서 탭만 숨김)</a></p>
 <p class="mute">받는 조서: <b>{esc(wp.name)}</b> (수정분개를 반영했으면 그 조서). 담당자 조서에서는 맡은 인덱스의 리드시트·세부조서와
 공통 탭(일반사항·총괄·TB·BS·IS·정산표·보고서 등)만 보이고 나머지는 숨깁니다. 지우는 것이 아니라 숨기기라
 엑셀에서 [숨기기 취소]로 언제든 다시 볼 수 있습니다. 맨 앞 '목차' 탭에서 내 탭으로 바로 이동합니다.</p>
@@ -1114,7 +1124,7 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
 <p>{tpl_btn}</p>
 <form method="post" action="/e/{eid}/adjust" enctype="multipart/form-data" class="row">
 <label>채운 수정분개 양식<input type="file" name="aje" accept=".xlsx" required></label>
-<label>다른 조서에 반영할 때만: 조서 파일 (비우면 마지막으로 채운 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
+<label>다른 조서에 반영할 때만: 조서 파일 (비우면 마지막으로 채운 전체계정 조서)<input type="file" name="workpaper" accept=".xlsx"></label>
 <button>수정분개 반영</button></form>
 <p class="mute">조서에 AJE·정산표·수정후BS·수정후IS·정산표-CF·보고서 BS·보고서IS·자본변동표·보고서현금흐름표 탭을 더하고, 리드시트 Audited(F/S) 칸을 'G/L + 수정분개' 수식으로 바꿉니다.
 모든 금액이 수식으로 이어져 있고 탭마다 검증 칸(0이어야 함)이 있습니다. 다시 올리면 그 탭들을 새로 만듭니다.</p>{last}
@@ -1622,20 +1632,22 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         self._download(data, f"{e['client_name']}_{e['fiscal_year']}_{e['kind']}_자료요청목록.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
 
     # ── 메일 ──────────────────────────────────────────
-    def _draft(self, eid, kind, on):
+    def _draft(self, eid, kind, on, again: bool = False):
         e, cfg = self._eng(eid), self.app.cfg()
         planned = next((p for p in schedule.plan(e, cfg) if p.kind == kind and p.on.isoformat() == on), None)
         if planned is None:
             raise ValueError("일정에 없는 메일입니다. 현장감사 일정이 바뀌었는지 확인하세요.")
-        if kind == "request":
+        if again:                       # 재발송: 아직 안 낸 자료 전부
+            items = self.store.outstanding(e["id"])
+        elif kind == "request":
             items = [i for i in self.store.items(e["id"]) if i["status"] == "미요청"] or self.store.outstanding(e["id"])
         else:
             items = self.store.outstanding(e["id"])
         return e, cfg, items, schedule.build_draft(e, items, planned, cfg)
 
     def mail_preview(self, eid, kind, on):
-        e, cfg, items, d = self._draft(eid, kind, on)
-        sent = self.store.mail_sent(e["id"], kind, date.fromisoformat(on))
+        sent = self.store.mail_sent(int(eid), kind, date.fromisoformat(on))
+        e, cfg, items, d = self._draft(eid, kind, on, again=sent)   # 보낸 메일은 재발송할 내용으로 보여 준다
         base = f"/e/{e['id']}/mail/{kind}/{on}"
         attach = "첨부: 자료요청목록.xlsx" if kind == "request" else ""
         after = "요청 항목이 '요청' 상태로 바뀌고 " if kind == "request" else ""
@@ -1644,7 +1656,11 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
                     f'onsubmit="return confirm({esc(json.dumps(f"{sender} 계정으로 {d.to} 에게 지금 보냅니다.", ensure_ascii=False))})">'
                     f'<button>지금 보내기</button></form> '
                     if cfg["mail_accounts"] and d.to else "")
-        actions = ('<p class="mute">이미 보낸 메일입니다.</p>' if sent else
+        n_out = len(self.store.outstanding(e["id"]))
+        resend = (self._send_form(f"{base}/send", d.to, n_out, again=True)
+                  if cfg["mail_accounts"] and d.to and n_out else "")
+        actions = (f'<p class="mute">이미 보낸 메일입니다. 아직 받지 못한 자료({n_out}건)만 담아 다시 보낼 수 있습니다.</p><p>{resend}</p>'
+                   if sent else
                    f"""<p>{send_btn}<a class="btn ghost" href="{base}.eml">아웃룩으로 열기 (.eml)</a>
 <form method="post" action="{base}/sent" style="display:inline"><button class="ghost">보냄으로 표시</button></form></p>
 <p class="mute">내려받은 .eml 을 열면 아웃룩에 보낼 수 있는 새 메일로 열립니다. 보낸 뒤 [보냄으로 표시]를 누르면
@@ -1670,19 +1686,64 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
         schedule.record_sent(self.store, d, self.app.today())
         self._redirect(f"/e/{eid}#tab-mail", f"{d.label} 메일을 보냄으로 기록했습니다.")
 
+    def _send_form(self, action: str, to: str, n_out: int, again: bool, small: bool = False,
+                   label: str | None = None) -> str:
+        """[지금 보내기]·[재발송] 버튼. 누르면 확인 창 한 번 뒤 바로 보낸다."""
+        msg = (f"아직 받지 못한 자료 {n_out}건을 {to} 에게 다시 보냅니다." if again
+               else f"{to} 에게 지금 보냅니다.")
+        label = label or ("재발송" if again else "지금 보내기")
+        cls = "ghost" if small else ""
+        hidden = '<input type="hidden" name="again" value="1">' if again else ""
+        return (f'<form method="post" action="{action}" style="display:inline" '
+                f'onsubmit="return confirm({esc(json.dumps(msg, ensure_ascii=False))})">{hidden}'
+                f'<button class="{cls}">{esc(label)}</button></form>')
+
+    def _resend_button(self, e, cfg) -> str:
+        """자료요청 탭의 [자료요청 메일 재발송]: 최초 요청 메일을 미제출 자료로 다시 보낸다."""
+        req = next((p for p in schedule.plan(e, cfg) if p.kind == "request"), None)
+        if req is None:
+            return ""
+        n_out = len(self.store.outstanding(e["id"]))
+        base = f"/e/{e['id']}/mail/request/{req.on.isoformat()}"
+        sent = self.store.request_sent(e["id"])
+        if not n_out:
+            return "<span class='mute'>미제출 자료가 없어 다시 보낼 메일이 없습니다.</span>"
+        if not (cfg["mail_accounts"] and e.get("contact_email")):
+            why = "회사 담당자 이메일" if cfg["mail_accounts"] else "설정 &gt; 메일 계정"
+            return (f"<a class='btn ghost' href='{base}'>자료요청 메일 {'다시 ' if sent else ''}보기</a> "
+                    f"<span class='mute'>바로 보내려면 {why}을 먼저 넣어 주세요.</span>")
+        return self._send_form(f"/e/{e['id']}/mail/resend", e["contact_email"], n_out, again=sent,
+                               label=f"자료요청 메일 {'재발송' if sent else '지금 보내기'} (미제출 {n_out}건)")
+
     def mail_send(self, eid, kind, on):
-        e, cfg, items, d = self._draft(eid, kind, on)
-        if self.store.mail_sent(e["id"], kind, d.planned_on):
-            raise ValueError("이미 보낸 메일입니다.")
+        f, _ = self._form()
+        self._send_mail(eid, kind, on, again=bool(f.get("again")))
+
+    def mail_resend(self, eid):
+        e, cfg = self._eng(eid), self.app.cfg()
+        req = next((p for p in schedule.plan(e, cfg) if p.kind == "request"), None)
+        if req is None:
+            raise ValueError("자료요청 메일 일정이 없습니다. 현장감사 일정을 넣어 주세요.")
+        self._send_mail(eid, "request", req.on.isoformat(), again=self.store.request_sent(e["id"]),
+                        back=f"/e/{eid}#tab-pbc")
+
+    def _send_mail(self, eid, kind, on, again: bool = False, back: str | None = None):
+        e, cfg, items, d = self._draft(eid, kind, on, again)
+        back = back or f"/e/{eid}#tab-mail"
+        if self.store.mail_sent(e["id"], kind, d.planned_on) and not again:
+            raise ValueError("이미 보낸 메일입니다. 다시 보내려면 [재발송]을 누르세요.")
         if not d.to:
             raise ValueError("회사 담당자 이메일이 없습니다.")
+        if again and not items:
+            raise ValueError("아직 받지 못한 자료가 없어 다시 보낼 것이 없습니다.")
         try:
             mailbox.send(cfg, mailer.message_for(self.store, cfg, e, d), mailbox.sender_for(cfg, e))
         except (OSError, mailbox.smtplib.SMTPException) as exc:
             raise ValueError(f"보내지 못했습니다: {exc}") from exc
         schedule.record_sent(self.store, d, self.app.today())
-        self.app.note([f"보냄: {e['client_name']} {d.label} → {d.to}"])
-        self._redirect(f"/e/{eid}#tab-mail", f"{d.label} 메일을 보냈습니다.")
+        word = "다시 보냈습니다" if again else "보냈습니다"
+        self.app.note([f"{'재발송' if again else '보냄'}: {e['client_name']} {d.label} → {d.to} ({len(items)}건)"])
+        self._redirect(back, f"{d.label} 메일을 {word} (자료 {len(items)}건).")
 
     def link_done(self, eid, lid):
         self.store.set_link_done(int(lid))

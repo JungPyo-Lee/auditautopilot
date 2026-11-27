@@ -265,6 +265,15 @@ def test_web_mail_settings_and_send(env, monkeypatch):
         assert "지금 보내기" in page
         assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {}) == 303
         assert len(FakeSMTP.sent) == 1 and s.request_sent(e["id"]) and FakeSMTP.sent[0]["From"] == "me@naver.com"
+        # 재발송: 미제출 자료만 담아 바로 다시 보낸다 (기록은 한 줄을 고쳐 씀)
+        eng_page = opener.open(base + f"/e/{e['id']}").read().decode()
+        assert "자료요청 메일 재발송" in eng_page and "재발송</button>" in eng_page
+        assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {}) == 303      # again 없으면 막힘
+        assert len(FakeSMTP.sent) == 1
+        assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {"again": "1"}) == 303
+        assert post(f"/e/{e['id']}/mail/resend", {}) == 303
+        assert len(FakeSMTP.sent) == 3 and len(s.mails(e["id"])) == 1
+        assert "다시 보낼 수 있습니다" in opener.open(base + f"/e/{e['id']}/mail/request/2027-01-04").read().decode()
         assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
         FakeSMTP.blocked = {465}       # 465가 막혀 있으면 587로 되고, 그 포트를 기억한다
         assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
