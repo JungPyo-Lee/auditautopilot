@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auditautopilot"
-version = "0.1.0"
+version = "0.2.0"
 description = "회계감사 중간·기말 업무 자동화 도구"
 readme = "README.md"
 requires-python = ">=3.10"
