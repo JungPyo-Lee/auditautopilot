@@ -58,10 +58,16 @@ set "PYTHONUTF8=1"
 """
 
 BAT_RUN = HEAD + PY_DETECT + r"""echo 관리 화면을 엽니다. 이 창을 닫거나 Ctrl+C를 누르면 끝납니다.
-echo 데이터: %~dp0data
-%PY% -m auditautopilot serve --db "%~dp0data\audit.db" %*
+echo 데이터는 프로그램 폴더 바깥(%LOCALAPPDATA%\auditautopilot)에 저장되어, 프로그램을 업데이트해도 지워지지 않습니다.
+%PY% -m auditautopilot serve %*
 echo.
 echo 관리 화면이 끝났습니다.
+pause
+"""
+
+BAT_UPDATE = HEAD + PY_DETECT + r"""echo 새 버전으로 업데이트합니다. 받은 새 zip 파일을 이 폴더에 둔 뒤 실행하세요.
+echo 업무 데이터는 다른 폴더(%LOCALAPPDATA%\auditautopilot)에 있어 그대로 유지됩니다.
+%PY% "%~dp0update.py"
 pause
 """
 
@@ -213,19 +219,19 @@ def build() -> Path:
                         continue
                     z.extract(member, app)
 
-        # 3) 배치 파일 (CRLF)
-        for fname, body in (("실행.bat", BAT_RUN), ("명령창.bat", BAT_CMD), ("pip설치.bat", BAT_PIP)):
+        # 3) 배치 파일 (CRLF) + 업데이트 스크립트
+        for fname, body in (("실행.bat", BAT_RUN), ("명령창.bat", BAT_CMD),
+                            ("업데이트.bat", BAT_UPDATE), ("pip설치.bat", BAT_PIP)):
             (stage / fname).write_bytes(body.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
+        (stage / "update.py").write_text((ROOT / "tools" / "update.py").read_text(encoding="utf-8"),
+                                         encoding="utf-8")
 
         # 4) 설명서
         md = (ROOT / "docs" / "manual.md").read_text(encoding="utf-8")
         (stage / "사용설명서.html").write_text(md_to_html(md, f"auditautopilot {__version__} 사용설명서"),
                                             encoding="utf-8")
         (stage / "사용설명서.md").write_text(md, encoding="utf-8")
-        (stage / "data").mkdir()
-        (stage / "data" / "여기에_데이터가_저장됩니다.txt").write_text(
-            "audit.db(감사 데이터)와 감사 폴더(받은 자료·조서)가 이 폴더에 생깁니다.\r\n"
-            "새 버전으로 바꿀 때는 이 data 폴더를 통째로 새 폴더에 옮기세요.\r\n", encoding="utf-8")
+        (stage / "버전.txt").write_text(f"auditautopilot {__version__}\r\n", encoding="utf-8")
 
         out = dist / f"{name}.zip"
         if out.exists():

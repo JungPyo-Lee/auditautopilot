@@ -36,7 +36,8 @@ python tools/build_release.py      # dist/auditautopilot-<버전>-windows.zip
 - `app/`에 이 패키지와 openpyxl·et_xmlfile(순수 파이썬)을 풀어 넣고, `실행.bat`·`명령창.bat`이 PYTHONPATH를 그 폴더로 잡아
   python.org 파이썬으로 실행한다. exe·DLL이 없고 pip도 쓰지 않으므로 앱 제어 정책에 막히지 않는다.
 - `wheels/`와 `pip설치.bat`은 사용자 계정에 설치하고 싶을 때만 쓴다(`python -m pip install --user --no-index`).
-- 데이터는 압축을 푼 폴더의 `data/`에 쌓인다. 새 버전은 다른 폴더에 풀고 `data/`를 옮긴다.
+- 데이터(audit.db, 받은 자료·조서)는 프로그램 폴더 바깥 고정 위치(`storage.data_home()`: 윈도우 `%LOCALAPPDATA%\auditautopilot`)에 쌓인다. 그래서 프로그램을 덮어써도 데이터가 남는다.
+- 업데이트: 새 zip을 폴더에 두고 `업데이트.bat`(= `update.py`)을 실행하면 app·실행 파일만 교체한다. 0.2.x의 프로그램 폴더 안 `data/`는 0.3.0 첫 실행 때 공용 위치로 자동 이사한다.
 
 ## 설치
 
