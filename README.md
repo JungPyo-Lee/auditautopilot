@@ -25,6 +25,19 @@
 | 받은 자료 정리 | 화면에서 올리거나 수신함 폴더에 넣으면 폴더 규칙대로 저장, 파일명의 요청번호·자료명으로 항목을 찾아 '수령' 처리. 못 찾은 파일은 미분류 폴더 |
 | 폴더 규칙 | `{루트}/{회사순번:02}.{회사명}/...` 처럼 칸을 조합. JP님 현재 규칙과 제안 규칙을 미리 넣어 둠 |
 
+## 배포 패키지 (윈도우)
+
+설치 없이 압축만 풀어 쓰는 zip을 만든다. 사용설명서는 [docs/manual.md](docs/manual.md) (패키지에는 HTML로 들어간다).
+
+```
+python tools/build_release.py      # dist/auditautopilot-<버전>-windows.zip
+```
+
+- `app/`에 이 패키지와 openpyxl·et_xmlfile(순수 파이썬)을 풀어 넣고, `실행.bat`·`명령창.bat`이 PYTHONPATH를 그 폴더로 잡아
+  python.org 파이썬으로 실행한다. exe·DLL이 없고 pip도 쓰지 않으므로 앱 제어 정책에 막히지 않는다.
+- `wheels/`와 `pip설치.bat`은 사용자 계정에 설치하고 싶을 때만 쓴다(`python -m pip install --user --no-index`).
+- 데이터는 압축을 푼 폴더의 `data/`에 쌓인다. 새 버전은 다른 폴더에 풀고 `data/`를 옮긴다.
+
 ## 설치
 
 Python 3.10 이상([python.org](https://www.python.org/downloads/) 설치본)이 필요하다.
