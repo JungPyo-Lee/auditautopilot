@@ -330,12 +330,28 @@ def fetch(store, cfg: dict, today: date | None = None, days: int = 14) -> FetchR
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
+MAX_LOOKBACK_DAYS = 180
+
+
+def since_date(store, user: str, today: date, days: int = 14) -> date:
+    """어디서부터 확인할지. 기본은 최근 n일이지만, 프로그램을 오래 꺼 두었으면 마지막으로 확인한 날부터
+    (하루 겹치게, 최대 180일) 거슬러 본다. 이미 처리한 메일은 메일 기록으로 건너뛰므로 겹쳐도 두 번 저장하지 않는다."""
+    d0 = today - timedelta(days=days)
+    last = store.get_setting(f"mail_fetched:{user}")
+    if last:
+        try:
+            d0 = min(d0, date.fromisoformat(last) - timedelta(days=1))
+        except ValueError:
+            pass
+    return max(d0, today - timedelta(days=MAX_LOOKBACK_DAYS))
+
+
 def _fetch_one(store, cfg: dict, acc: dict, today: date, days: int, res: FetchResult) -> None:
     m = imaplib.IMAP4_SSL(acc["imap_host"], acc["imap_port"], ssl_context=ssl.create_default_context())
     try:
         m.login(acc["user"], acc["password"])
         m.select("INBOX", readonly=True)
-        d0 = today - timedelta(days=days)
+        d0 = since_date(store, acc["user"], today, days)
         since = f"{d0.day:02d}-{_MONTHS[d0.month - 1]}-{d0.year}"   # 지역 설정과 무관하게 영문 월
         typ, data = m.uid("SEARCH", None, "SINCE", since)
         uids = (data[0] or b"").split() if typ == "OK" else []
@@ -359,6 +375,7 @@ def _fetch_one(store, cfg: dict, acc: dict, today: date, days: int, res: FetchRe
                 res.skipped += 1
             res.saved.extend(out["files"])
             res.links += len(out["links"])
+        store.set_setting(f"mail_fetched:{acc['user']}", today.isoformat())   # 다음에 켰을 때 여기부터
     finally:
         try:
             m.logout()

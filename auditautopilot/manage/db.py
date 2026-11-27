@@ -337,7 +337,11 @@ class Store:
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO mail_log(engagement_id, kind, planned_on, sent_at, to_addr, subject, body, "
-                "item_codes) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                "item_codes) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                # 재발송이면 같은 줄을 마지막으로 보낸 내용으로 바꾼다
+                "ON CONFLICT(engagement_id, kind, planned_on) DO UPDATE SET sent_at = excluded.sent_at, "
+                "to_addr = excluded.to_addr, subject = excluded.subject, body = excluded.body, "
+                "item_codes = excluded.item_codes",
                 (engagement_id, kind, _iso(planned_on), datetime.now().isoformat(timespec="seconds"),
                  to_addr, subject, body, json.dumps(item_codes, ensure_ascii=False)))
         return cur.lastrowid

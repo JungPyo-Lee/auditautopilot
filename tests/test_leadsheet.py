@@ -231,6 +231,9 @@ def test_web_leadsheet(server, store, template, tb_file, dz):  # noqa: F811
     assert openpyxl.load_workbook(io.BytesIO(x))["TB"]["F16"].value == "외상매출금"
     page = _open(base + f"/e/{eid}")[2].decode()
     assert "조서양식_리드시트.xlsx" in page and "C1100" in page
+    assert "전체계정 조서 내려받기" in page                      # 담당자 배정과 관계없이 전체 계정 조서
+    st, _, full = _open(base + f"/e/{eid}/mine.xlsx")
+    assert st == 200 and full[:2] == b"PK"
 
 
 # ---------------------------------------------------------------- XML 편집 도구

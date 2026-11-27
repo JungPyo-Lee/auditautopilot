@@ -1,6 +1,6 @@
 """메일 보내기·받기. 실제 서버 대신 가짜 SMTP·IMAP 객체를 쓴다."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from email.utils import make_msgid
 
@@ -265,6 +265,15 @@ def test_web_mail_settings_and_send(env, monkeypatch):
         assert "지금 보내기" in page
         assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {}) == 303
         assert len(FakeSMTP.sent) == 1 and s.request_sent(e["id"]) and FakeSMTP.sent[0]["From"] == "me@naver.com"
+        # 재발송: 미제출 자료만 담아 바로 다시 보낸다 (기록은 한 줄을 고쳐 씀)
+        eng_page = opener.open(base + f"/e/{e['id']}").read().decode()
+        assert "자료요청 메일 재발송" in eng_page and "재발송</button>" in eng_page
+        assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {}) == 303      # again 없으면 막힘
+        assert len(FakeSMTP.sent) == 1
+        assert post(f"/e/{e['id']}/mail/request/2027-01-04/send", {"again": "1"}) == 303
+        assert post(f"/e/{e['id']}/mail/resend", {}) == 303
+        assert len(FakeSMTP.sent) == 3 and len(s.mails(e["id"])) == 1
+        assert "다시 보낼 수 있습니다" in opener.open(base + f"/e/{e['id']}/mail/request/2027-01-04").read().decode()
         assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
         FakeSMTP.blocked = {465}       # 465가 막혀 있으면 587로 되고, 그 포트를 기억한다
         assert post("/settings/mail-test", {"user": "me@gmail.com"}) == 303
@@ -301,3 +310,18 @@ def test_connection_falls_back_to_587_and_explains(env):
     mailbox.set_password("me@gmail.com", "wrong")
     r = mailbox.test_connection(cfg, "me@gmail.com")
     assert not r.smtp_ok and "앱 비밀번호" in r.smtp_msg and r.smtp_port is None
+
+
+def test_fetch_looks_back_to_last_check_after_long_break(env):
+    """프로그램을 오래 꺼 두었다가 켜면 마지막으로 확인한 날부터 다시 본다 (최대 180일)."""
+    s, _ = env
+    today = date(2027, 1, 20)
+    assert mailbox.since_date(s, "me@gmail.com", today) == date(2027, 1, 6)        # 처음: 최근 14일
+    s.set_setting("mail_fetched:me@gmail.com", "2026-12-01")                       # 50일 꺼 둠
+    assert mailbox.since_date(s, "me@gmail.com", today) == date(2026, 11, 30)
+    s.set_setting("mail_fetched:me@gmail.com", "2027-01-19")                       # 어제 켬: 기본 14일
+    assert mailbox.since_date(s, "me@gmail.com", today) == date(2027, 1, 6)
+    s.set_setting("mail_fetched:me@gmail.com", "2025-01-01")                       # 너무 오래면 180일까지만
+    assert mailbox.since_date(s, "me@gmail.com", today) == today - timedelta(days=180)
+    mailbox.fetch(s, config.load(s), today)
+    assert s.get_setting("mail_fetched:me@gmail.com") == "2027-01-20"
