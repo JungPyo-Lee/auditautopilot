@@ -1,6 +1,6 @@
 """메일 보내기·받기. 실제 서버 대신 가짜 SMTP·IMAP 객체를 쓴다."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from email.utils import make_msgid
 
@@ -310,3 +310,18 @@ def test_connection_falls_back_to_587_and_explains(env):
     mailbox.set_password("me@gmail.com", "wrong")
     r = mailbox.test_connection(cfg, "me@gmail.com")
     assert not r.smtp_ok and "앱 비밀번호" in r.smtp_msg and r.smtp_port is None
+
+
+def test_fetch_looks_back_to_last_check_after_long_break(env):
+    """프로그램을 오래 꺼 두었다가 켜면 마지막으로 확인한 날부터 다시 본다 (최대 180일)."""
+    s, _ = env
+    today = date(2027, 1, 20)
+    assert mailbox.since_date(s, "me@gmail.com", today) == date(2027, 1, 6)        # 처음: 최근 14일
+    s.set_setting("mail_fetched:me@gmail.com", "2026-12-01")                       # 50일 꺼 둠
+    assert mailbox.since_date(s, "me@gmail.com", today) == date(2026, 11, 30)
+    s.set_setting("mail_fetched:me@gmail.com", "2027-01-19")                       # 어제 켬: 기본 14일
+    assert mailbox.since_date(s, "me@gmail.com", today) == date(2027, 1, 6)
+    s.set_setting("mail_fetched:me@gmail.com", "2025-01-01")                       # 너무 오래면 180일까지만
+    assert mailbox.since_date(s, "me@gmail.com", today) == today - timedelta(days=180)
+    mailbox.fetch(s, config.load(s), today)
+    assert s.get_setting("mail_fetched:me@gmail.com") == "2027-01-20"
