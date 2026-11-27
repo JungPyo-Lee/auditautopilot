@@ -180,8 +180,8 @@ th,td{{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-ali
 code{{background:#ece6d6;padding:1px 5px;border-radius:4px;font-size:13px}}
 pre{{background:#1f2a1c;color:#f3f0e6;padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:13px}}
 .note{{background:#fff8e0;border-left:4px solid #d4a72c;padding:8px 12px}}
-nav ol{{columns:2;font-size:14px}}a{{color:#31110F}}
-</style></head><body><main><nav><ol>{nav}</ol></nav>{''.join(out)}</main></body></html>"""
+nav ul{{columns:2;font-size:14px}}td:first-child{{white-space:nowrap}}a{{color:#31110F}}
+</style></head><body><main><nav><ul>{nav}</ul></nav>{''.join(out)}</main></body></html>"""
 
 
 def build() -> Path:
