@@ -171,6 +171,45 @@ def split_names(text: str) -> list[str]:
     return [n.strip() for n in re.split(r"[,/·\s]+", text or "") if n.strip()]
 
 
+# 미리 배정 카테고리: 매출·매입 사이클(채권·채무·매출·원가·판관비)과 그 밖의 계정
+CATEGORIES = ("매출및매입", "기타계정")
+# 묶음 -> 총괄 계정과목에 들어 있으면 그 묶음 (위에서부터 먼저 맞는 것: '매출원가'는 원가, '매출채권'은 채권)
+SALES_PURCHASE_GROUPS = (
+    ("판관비", ("판매비", "판관비", "관리비")),
+    ("원가", ("원가",)),
+    ("채권", ("매출채권", "외상매출금", "받을어음", "공사미수금", "분양미수금", "미수금", "기타유동자산")),
+    ("채무", ("매입채무", "외상매입금", "지급어음", "미지급금", "선수금", "기타유동부채")),
+    ("매출", ("매출",)),
+)
+GROUP_NAMES = tuple(g for g, _ in SALES_PURCHASE_GROUPS)
+
+
+def account_group(account: str) -> str | None:
+    """총괄 계정과목 -> 매출및매입 묶음 이름(채권·채무·매출·원가·판관비). 해당 없으면 None.
+    미수금은 기타유동자산(D), 미지급금·분양선수금은 기타유동부채(CC) 인덱스에 들어가므로 그 인덱스도 채권·채무로 본다."""
+    t = re.sub(r"\s", "", account or "")
+    for group, words in SALES_PURCHASE_GROUPS:
+        if any(w in t for w in words):
+            return group
+    return None
+
+
+def default_category(account: str) -> str:
+    return CATEGORIES[0] if account_group(account) else CATEGORIES[1]
+
+
+def reassign(assignments: list[Assignment], targets: set[str], names: list[str], mode: str = "set") -> list[Assignment]:
+    """targets 인덱스의 담당자를 names로 바꾼다 (mode='add'면 기존 담당자에 덧붙인다)."""
+    out = []
+    for a in assignments:
+        if a.index in targets:
+            cur = split_names(a.assignee) if mode == "add" else []
+            cur += [n for n in names if n not in cur]
+            a = Assignment(a.index, a.account, ", ".join(cur))
+        out.append(a)
+    return out
+
+
 def read_assign_matrix(path: str | Path, assignments: list[Assignment]) -> list[Assignment]:
     """'assign' 탭 (계정과목 줄 × 담당자 열, 맡은 칸에 V)을 읽어 총괄 인덱스에 담당자를 붙인다.
     계정과목 이름이 총괄 계정과목과 겹치는 인덱스에 붙이고, 못 맞춘 줄은 버린다. 탭이 없으면 그대로 돌려준다."""

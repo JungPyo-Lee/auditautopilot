@@ -310,6 +310,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/e/(\d+)/leadsheet", "leadsheet_make"),
         ("GET", r"/e/(\d+)/leadsheet\.xlsx", "leadsheet_xlsx"),
         ("POST", r"/e/(\d+)/assign", "assign_save"),
+        ("POST", r"/e/(\d+)/team", "team_save"),
         ("GET", r"/e/(\d+)/mine\.xlsx", "mine_xlsx"),
         ("GET", r"/e/(\d+)/aje-template\.xlsx", "aje_template"),
         ("POST", r"/e/(\d+)/adjust", "adjust_make"),
@@ -893,8 +894,24 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             return []
         return read_assign_matrix(wp, read_assignments(wp))
 
-    def _assign_card(self, e) -> str:
+    def _team(self, e, items) -> list[str]:
+        """감사 참여자 명단: 이 감사에 저장한 명단, 없으면 지난번 명단, 그것도 없으면 조서에 적힌 담당자"""
         from ..workpaper.prepare import people
+
+        saved = self.store.get_setting(f"team:{e['id']}")
+        if saved is None:
+            saved = self.store.get_setting("team:last") or people(items)
+        return list(saved)
+
+    def _categories(self, e, items) -> dict[str, str]:
+        from ..workpaper.prepare import CATEGORIES, default_category
+
+        saved = self.store.get_setting(f"assign_cat:{e['id']}") or {}
+        return {a.index: saved.get(a.index) if saved.get(a.index) in CATEGORIES else default_category(a.account)
+                for a in items}
+
+    def _assign_card(self, e) -> str:
+        from ..workpaper.prepare import CATEGORIES, GROUP_NAMES, account_group, people, split_names
 
         eid = e["id"]
         wp = self._working_workpaper(e)
@@ -907,34 +924,131 @@ TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거�
             return head + f"<p class='mute'>조서에서 담당자 표를 읽지 못했습니다: {esc(str(ex))}</p></div>"
         if not items:
             return head + "<p class='mute'>조서 총괄 시트에 '인덱스 | 계정과목 | 담당자' 표가 없어 배정할 수 없습니다.</p></div>"
-        rows = "".join(
-            f"<tr><td>{esc(a.index)}</td><td>{esc(a.account)}</td>"
-            f"<td><input name='who_{esc(a.index)}' value='{esc(a.assignee)}' style='width:14em'></td></tr>" for a in items)
+        team = self._team(e, items)
+        extra = [n for n in people(items) if n not in team]       # 명단에 없는데 배정돼 있는 사람
+        cols = team + extra
+        cats = self._categories(e, items)
         names = people(items)
         btns = "".join(f"<a class='btn' href='/e/{eid}/mine.xlsx?who={urllib.parse.quote(n)}'>{esc(n)} 조서</a> "
                        for n in names)
+
+        # 참여자 명단
+        team_form = f"""<form method="post" action="/e/{eid}/team" class="row" style="margin-top:8px">
+<label style="flex:1">감사 참여자 (한 줄에 한 명, 또는 쉼표로)<textarea name="team" rows="3" style="width:100%">{esc(chr(10).join(team))}</textarea></label>
+<button>참여자 저장</button></form>
+<p class="mute">저장한 명단은 다음 감사를 만들 때도 미리 채워집니다.</p>"""
+
+        # 카테고리·묶음 단위 일괄 배정
+        count = {c: sum(1 for a in items if cats[a.index] == c) for c in CATEGORIES}
+        groups = [g for g in GROUP_NAMES if any(cats[a.index] == CATEGORIES[0] and account_group(a.account) == g
+                                                  for a in items)]
+        targets = [(f"cat:{c}", f"{c} 전체 ({count[c]}개)") for c in CATEGORIES] + \
+                  [(f"grp:{g}", f"└ {CATEGORIES[0]} 중 {g}") for g in groups]
+        if cols:
+            bulk = f"""<form method="post" action="/e/{eid}/assign" class="row" style="margin-top:8px">
+<input type="hidden" name="bulk" value="1">
+<label>대상<select name="target">{options(targets)}</select></label>
+<label>담당자<select name="who">{options([(n, n) for n in cols] + [("", "(담당자 비우기)")])}</select></label>
+<button name="mode" value="set">바꾸기</button><button class="ghost" name="mode" value="add">담당자 추가</button></form>
+<p class="mute">[바꾸기]는 대상 인덱스의 담당자를 그 사람으로 바꾸고, [담당자 추가]는 기존 담당자는 두고 한 명을 더 붙입니다.</p>"""
+        else:
+            bulk = "<p class='mute'>먼저 감사 참여자를 등록하면 카테고리별로 한 번에 배정할 수 있습니다.</p>"
+
+        # 인덱스별 표 (카테고리별로 묶어서)
+        head_cells = "".join(f"<th style='text-align:center'>{esc(n)}{'*' if n in extra else ''}</th>" for n in cols)
+        body = ""
+        for c in CATEGORIES:
+            mine = [a for a in items if cats[a.index] == c]
+            if not mine:
+                continue
+            body += f"<tr><th colspan='{3 + len(cols)}' style='text-align:left'>{esc(c)} ({len(mine)}개)</th></tr>"
+            for a in mine:
+                who = split_names(a.assignee)
+                checks = "".join(
+                    f"<td style='text-align:center'><input type='checkbox' name='who_{esc(a.index)}' value='{esc(n)}'"
+                    f"{' checked' if n in who else ''} aria-label='{esc(a.index)} {esc(n)}'></td>" for n in cols)
+                grp = account_group(a.account) if c == CATEGORIES[0] else None
+                body += (f"<tr><td>{esc(a.index)}</td><td>{esc(a.account)}"
+                         f"{f' <span class=mute>({esc(grp)})</span>' if grp else ''}</td>"
+                         f"<td><select name='cat_{esc(a.index)}'>{options([(x, x) for x in CATEGORIES], c)}</select></td>"
+                         f"{checks}</tr>")
+        note = "<p class='mute'>* 표시는 참여자 명단에 없지만 조서에 담당자로 적혀 있는 사람입니다.</p>" if extra else ""
         return head + f"""<p class="row">{btns}<a class="btn ghost" href="/e/{eid}/mine.xlsx">전체 조서 (절차서 탭만 숨김)</a></p>
 <p class="mute">받는 조서: <b>{esc(wp.name)}</b> (수정분개를 반영했으면 그 조서). 담당자 조서에서는 맡은 인덱스의 리드시트·세부조서와
 공통 탭(일반사항·총괄·TB·BS·IS·정산표·보고서 등)만 보이고 나머지는 숨깁니다. 지우는 것이 아니라 숨기기라
 엑셀에서 [숨기기 취소]로 언제든 다시 볼 수 있습니다. 맨 앞 '목차' 탭에서 내 탭으로 바로 이동합니다.</p>
+<details{'' if team else ' open'}><summary>감사 참여자 ({len(team)}명)</summary>{team_form}</details>
+<details open><summary>카테고리별로 한 번에 배정</summary>{bulk}</details>
 <details><summary>인덱스별 담당자 정하기 ({len(items)}개)</summary>
 <form method="post" action="/e/{eid}/assign" style="margin-top:8px">
-<table><tr><th>인덱스</th><th>계정과목</th><th>담당자 (여럿이면 쉼표)</th></tr>{rows}</table>
+<input type="hidden" name="rows" value="1">
+<div style="overflow-x:auto"><table><tr><th>인덱스</th><th>계정과목</th><th>카테고리</th>{head_cells}</tr>{body}</table></div>{note}
 <p class="row"><button>담당자 저장</button>
 <button class="ghost" name="reset" value="1" formnovalidate>조서에서 다시 읽기</button></p></form>
-<p class="mute">처음에는 조서의 assign 탭(계정과목 × 담당자 V 표시)과 총괄 시트 담당자 칸에서 읽어 옵니다.</p></details></div>"""
+<p class="mute">처음에는 조서의 assign 탭(계정과목 × 담당자 V 표시)과 총괄 시트 담당자 칸에서 읽어 옵니다.
+매출및매입에는 매출채권·미수금(기타유동자산)·매입채무·미지급금·선수금(기타유동부채)과 매출·원가·판관비가 들어가고,
+나머지는 기타계정입니다. 카테고리를 바꾸려면 그 줄의 카테고리를 고르고 저장하세요.</p></details></div>"""
+
+    def team_save(self, eid):
+        e = self._eng(eid)
+        f, _ = self._form()
+        team: list[str] = []
+        for line in re.split(r"[\n,]", f.get("team", "")):
+            n = line.strip()
+            if n and n not in team:
+                team.append(n)
+        self.store.set_setting(f"team:{e['id']}", team)
+        self.store.set_setting("team:last", team)
+        self._redirect(f"/e/{eid}#assign", f"감사 참여자 {len(team)}명을 저장했습니다")
 
     def assign_save(self, eid):
+        from ..workpaper.prepare import CATEGORIES, Assignment, account_group, reassign, split_names
+
         e = self._eng(eid)
         f, _ = self._form()
         if f.get("reset"):
             self.store.set_setting(f"assign:{e['id']}", None)
+            self.store.set_setting(f"assign_cat:{e['id']}", None)
             self._redirect(f"/e/{eid}#assign", "조서에서 담당자를 다시 읽었습니다")
             return
         items = self._assignments(e, self._working_workpaper(e))
-        out = [[a.index, a.account, (f.get(f"who_{a.index}", a.assignee) or "").strip()] for a in items]
-        self.store.set_setting(f"assign:{e['id']}", out)
-        self._redirect(f"/e/{eid}#assign", "담당자를 저장했습니다")
+        cats = self._categories(e, items)
+        if f.get("bulk"):
+            kind, _, name = (f.get("target") or "").partition(":")
+            if kind == "cat":
+                targets = {a.index for a in items if cats[a.index] == name}
+            elif kind == "grp":
+                targets = {a.index for a in items if cats[a.index] == CATEGORIES[0] and account_group(a.account) == name}
+            else:
+                raise ValueError("배정할 대상을 골라 주세요.")
+            who = (f.get("who") or "").strip()
+            mode = "add" if f.get("mode") == "add" else "set"
+            if mode == "add" and not who:
+                raise ValueError("추가할 담당자를 골라 주세요.")
+            items = reassign(items, targets, [who] if who else [], mode)
+            if mode == "add":
+                msg = f"{name} {len(targets)}개 인덱스에 {who} 담당을 추가했습니다"
+            else:
+                msg = f"{name} {len(targets)}개 인덱스의 담당자를 {who or '비움'}(으)로 바꿨습니다"
+        else:
+            if f.get("rows"):          # 표에서 저장: 체크한 사람만 (모두 끄면 담당자 없음)
+                new = []
+                for a in items:
+                    vals = f.get(f"who_{a.index}[]", [])
+                    picked: list[str] = []
+                    for v in vals:
+                        picked += [n for n in split_names(v) if n not in picked]
+                    new.append(Assignment(a.index, a.account, ", ".join(picked)))
+                items = new
+                cats = {a.index: (f.get(f"cat_{a.index}") if f.get(f"cat_{a.index}") in CATEGORIES else cats[a.index])
+                        for a in items}
+                self.store.set_setting(f"assign_cat:{e['id']}", cats)
+            else:                      # 예전 방식: 인덱스마다 이름 글자
+                items = [Assignment(a.index, a.account, (f.get(f"who_{a.index}", a.assignee) or "").strip())
+                         for a in items]
+            msg = "담당자를 저장했습니다"
+        self.store.set_setting(f"assign:{e['id']}", [[a.index, a.account, a.assignee] for a in items])
+        self._redirect(f"/e/{eid}#assign", msg)
 
     def mine_xlsx(self, eid):
         import tempfile

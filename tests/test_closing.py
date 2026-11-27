@@ -231,3 +231,46 @@ def test_web_assignee_workpaper(workpaper_file, server, store):  # noqa: F811
     assert st == 200 and openpyxl.load_workbook(io.BytesIO(body))["AA1000"].sheet_state == "visible"
     _open(base + f"/e/{eid}/assign", {"reset": "1"})
     assert "홍길동 조서" in _open(base + f"/e/{eid}")[2].decode()
+
+
+def test_web_team_and_category_assign(workpaper_file, server, store):  # noqa: F811
+    from auditautopilot.workpaper.prepare import account_group, default_category, reassign, Assignment
+    assert [account_group(x) for x in ("매출채권(장단기)", "기타유동자산", "매입채무", "기타유동부채", "매출원가 및 제조원가",
+                                       "판매비와 관리비", "매출 및 기타수익", "이연법인세, 미지급법인세", "현금")] == \
+        ["채권", "채권", "채무", "채무", "원가", "판관비", "매출", None, None]
+    assert default_category("유형자산") == "기타계정"
+    items = reassign([Assignment("C", "매출채권", "갑"), Assignment("A", "현금", "을")], {"C"}, ["병"], "add")
+    assert items[0].assignee == "갑, 병" and items[1].assignee == "을"
+
+    base, _ = server
+    cid = store.add_client("C017", "가나상사", "김담당", "kim@example.com")
+    eid = store.add_engagement(cid, 2026, "기말감사", "2027-01-11", "2027-01-15")
+    store.set_setting(f"leadsheet:{eid}", {"made_at": "x", "path": str(workpaper_file), "lines": []})
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "감사 참여자 (2명)" in page and "매출및매입 전체 (2개)" in page and "기타계정 전체 (2개)" in page
+    # 참여자 등록 -> 드롭다운·체크 칸
+    _open(base + f"/e/{eid}/team", {"team": "박감사\n최감사, 박감사"})
+    assert store.get_setting(f"team:{eid}") == ["박감사", "최감사"] == store.get_setting("team:last")
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "<option value=\"최감사\">최감사</option>" in page and "홍길동*" in page   # 명단 밖 담당자 표시
+    # 카테고리 통째로 바꾸기, 묶음에 추가
+    st, hdr, _ = _open(base + f"/e/{eid}/assign", {"bulk": "1", "target": "cat:매출및매입", "who": "박감사", "mode": "set"})
+    assert st == 303
+    st, hdr, _ = _open(base + f"/e/{eid}/assign", {"bulk": "1", "target": "grp:채무", "who": "최감사", "mode": "add"})
+    a = {x[0]: x[2] for x in store.get_setting(f"assign:{eid}")}
+    assert a == {"A": "홍길동", "AA": "박감사, 최감사", "C": "박감사", "E100": "홍길동"}
+    _open(base + f"/e/{eid}/assign", {"bulk": "1", "target": "cat:기타계정", "who": "최감사", "mode": "set"})
+    assert {x[0]: x[2] for x in store.get_setting(f"assign:{eid}")}["A"] == "최감사"
+    # 표에서 저장: 체크한 사람만, 카테고리 바꾸기
+    _open(base + f"/e/{eid}/assign", {"rows": "1", "who_A": ["박감사", "최감사"], "who_C": "최감사",
+                                       "cat_A": "매출및매입", "cat_C": "매출및매입", "cat_AA": "매출및매입",
+                                       "cat_E100": "기타계정"})
+    a = {x[0]: x[2] for x in store.get_setting(f"assign:{eid}")}
+    assert a == {"A": "박감사, 최감사", "AA": "", "C": "최감사", "E100": ""}
+    assert store.get_setting(f"assign_cat:{eid}")["A"] == "매출및매입"
+    page = _open(base + f"/e/{eid}")[2].decode()
+    assert "매출및매입 전체 (3개)" in page and "기타계정 전체 (1개)" in page
+    # 새 감사는 지난 명단으로 시작
+    eid2 = store.add_engagement(cid, 2027, "중간감사", "2027-08-01", "2027-08-02")
+    store.set_setting(f"leadsheet:{eid2}", {"made_at": "x", "path": str(workpaper_file), "lines": []})
+    assert "감사 참여자 (2명)" in _open(base + f"/e/{eid2}")[2].decode()
