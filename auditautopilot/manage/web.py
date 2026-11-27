@@ -236,6 +236,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/e/(\d+)/confirm\.xlsx", "confirm_xlsx"),
         ("POST", r"/e/(\d+)/leadsheet", "leadsheet_make"),
         ("GET", r"/e/(\d+)/leadsheet\.xlsx", "leadsheet_xlsx"),
+        ("POST", r"/e/(\d+)/assign", "assign_save"),
+        ("GET", r"/e/(\d+)/mine\.xlsx", "mine_xlsx"),
         ("GET", r"/e/(\d+)/aje-template\.xlsx", "aje_template"),
         ("POST", r"/e/(\d+)/adjust", "adjust_make"),
         ("GET", r"/e/(\d+)/adjusted\.xlsx", "adjusted_xlsx"),
@@ -635,7 +637,7 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
 <form method="post" action="/e/{e['id']}/sweep"><button class="ghost">수신함 정리</button></form></details></div>""",
             "questions": self._question_card(e, cfg),
             "confirm": self._confirm_card(e, cfg),
-            "lead": self._leadsheet_card(e),
+            "lead": self._leadsheet_card(e) + self._assign_card(e),
             "close": f"<div class='card'>{self._adjust_part(e, lead_rec)}</div>",
         }
         body = f"""<p class="mute">{esc(e['client_code'])} · 현장감사 {esc(e['fieldwork_start'])} ~ {esc(e['fieldwork_end'])}
@@ -797,6 +799,85 @@ ev.preventDefault();var k=a.getAttribute('href').slice(5);show(k);history.replac
 TB·BS·IS 탭이 채워져 ○1000 리드시트가 저절로 계산되고, 거래처원장은 해당 ○1100 탭에 거래처별 명세로 들어갑니다.
 거래처원장이 어느 계정인지는 잔액으로 찾고, 못 찾으면 파일 이름을 계정명으로 바꿔 올려 주세요 (예: 미지급금.xlsx).
 회사가 준 시산표를 조서에 옮겨 적는 것이며 재무제표를 대신 작성하지 않습니다.</p>{last}</div>"""
+
+    # ── 담당자별 조서 ────────────────────────────────
+    def _working_workpaper(self, e) -> Path | None:
+        """수정분개를 반영한 조서가 있으면 그것, 없으면 마지막으로 채운 조서"""
+        for key in ("adjust", "leadsheet"):
+            rec = self.store.get_setting(f"{key}:{e['id']}") or {}
+            p = Path(rec.get("path") or "")
+            if rec and p.exists():
+                return p
+        return None
+
+    def _assignments(self, e, wp: Path | None, fresh: bool = False):
+        from ..workpaper.prepare import Assignment, read_assign_matrix, read_assignments
+
+        saved = None if fresh else self.store.get_setting(f"assign:{e['id']}")
+        if saved:
+            return [Assignment(*x) for x in saved]
+        if wp is None:
+            return []
+        return read_assign_matrix(wp, read_assignments(wp))
+
+    def _assign_card(self, e) -> str:
+        from ..workpaper.prepare import people
+
+        eid = e["id"]
+        wp = self._working_workpaper(e)
+        head = '<div class="card" id="assign"><h2 style="margin-top:0">담당자별 조서 (맡은 탭만 보이기)</h2>'
+        if wp is None:
+            return head + "<p class='mute'>위에서 [조서 채우기]를 하면 여기서 인덱스마다 담당자를 정하고 담당자별 조서를 받을 수 있습니다.</p></div>"
+        try:
+            items = self._assignments(e, wp)
+        except Exception as ex:      # 조서를 못 읽어도 화면은 보여 준다
+            return head + f"<p class='mute'>조서에서 담당자 표를 읽지 못했습니다: {esc(str(ex))}</p></div>"
+        if not items:
+            return head + "<p class='mute'>조서 총괄 시트에 '인덱스 | 계정과목 | 담당자' 표가 없어 배정할 수 없습니다.</p></div>"
+        rows = "".join(
+            f"<tr><td>{esc(a.index)}</td><td>{esc(a.account)}</td>"
+            f"<td><input name='who_{esc(a.index)}' value='{esc(a.assignee)}' style='width:14em'></td></tr>" for a in items)
+        names = people(items)
+        btns = "".join(f"<a class='btn' href='/e/{eid}/mine.xlsx?who={urllib.parse.quote(n)}'>{esc(n)} 조서</a> "
+                       for n in names)
+        return head + f"""<p class="row">{btns}<a class="btn ghost" href="/e/{eid}/mine.xlsx">전체 조서 (절차서 탭만 숨김)</a></p>
+<p class="mute">받는 조서: <b>{esc(wp.name)}</b> (수정분개를 반영했으면 그 조서). 담당자 조서에서는 맡은 인덱스의 리드시트·세부조서와
+공통 탭(일반사항·총괄·TB·BS·IS·정산표·보고서 등)만 보이고 나머지는 숨깁니다. 지우는 것이 아니라 숨기기라
+엑셀에서 [숨기기 취소]로 언제든 다시 볼 수 있습니다. 맨 앞 '목차' 탭에서 내 탭으로 바로 이동합니다.</p>
+<details><summary>인덱스별 담당자 정하기 ({len(items)}개)</summary>
+<form method="post" action="/e/{eid}/assign" style="margin-top:8px">
+<table><tr><th>인덱스</th><th>계정과목</th><th>담당자 (여럿이면 쉼표)</th></tr>{rows}</table>
+<p class="row"><button>담당자 저장</button>
+<button class="ghost" name="reset" value="1" formnovalidate>조서에서 다시 읽기</button></p></form>
+<p class="mute">처음에는 조서의 assign 탭(계정과목 × 담당자 V 표시)과 총괄 시트 담당자 칸에서 읽어 옵니다.</p></details></div>"""
+
+    def assign_save(self, eid):
+        e = self._eng(eid)
+        f, _ = self._form()
+        if f.get("reset"):
+            self.store.set_setting(f"assign:{e['id']}", None)
+            self._redirect(f"/e/{eid}#assign", "조서에서 담당자를 다시 읽었습니다")
+            return
+        items = self._assignments(e, self._working_workpaper(e))
+        out = [[a.index, a.account, (f.get(f"who_{a.index}", a.assignee) or "").strip()] for a in items]
+        self.store.set_setting(f"assign:{e['id']}", out)
+        self._redirect(f"/e/{eid}#assign", "담당자를 저장했습니다")
+
+    def mine_xlsx(self, eid):
+        import tempfile
+
+        from ..workpaper.prepare import prepare_workpaper
+
+        e = self._eng(eid)
+        wp = self._working_workpaper(e)
+        if wp is None:
+            raise ValueError("먼저 [조서 채우기]를 해 주세요.")
+        who = (self._query().get("who") or "").strip() or None
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            out = Path(tmp) / "out.xlsx"
+            prepare_workpaper(wp, out, assignee=who, assignments=self._assignments(e, wp))
+            data = out.read_bytes()
+        self._download(data, f"{wp.stem}_{who or '전체'}.xlsx", mailer.XLSX[0] + "/" + mailer.XLSX[1])
 
     def leadsheet_make(self, eid):
         import tempfile
